@@ -1,0 +1,4 @@
+libs/apkverify/tests/data/input.272629760 filter=lfs diff=lfs merge=lfs -text
+libs/idsig/testdata/input.272629760 filter=lfs diff=lfs merge=lfs -text
+**/input.272629760 filter=lfs diff=lfs merge=lfs -text
+microdroid/kernel/arm64/kernel-5.15* filter=lfs diff=lfs merge=lfs -text

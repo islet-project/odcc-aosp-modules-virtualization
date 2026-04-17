@@ -1,1 +1,1 @@
-androidboot.boot_devices = 10000.pci
+androidboot.boot_devices = 40000000.pci,10000.pci

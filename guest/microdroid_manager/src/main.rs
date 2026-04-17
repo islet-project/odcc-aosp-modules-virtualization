@@ -1,4 +1,5 @@
 // Copyright 2021, The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,12 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Samsung's changes: add support for Islet/Arm CCA
+
 //! Microdroid Manager
 
+mod arm_cca;
 mod dice;
 mod instance;
 mod ioutil;
 mod payload;
+mod provisioning;
 mod swap;
 mod verify;
 mod vm_payload_service;
@@ -31,6 +36,7 @@ use android_system_virtualization_payload::aidl::android::system::virtualization
     ENCRYPTEDSTORE_MOUNTPOINT,
 };
 
+use crate::arm_cca::{display_realm_config, display_realm_measurements, extend_measurements_for_payload, is_arm_cca_supported};
 use crate::dice::dice_derivation;
 use crate::instance::{InstanceDisk, MicrodroidData};
 use crate::verify::verify_payload;
@@ -59,10 +65,10 @@ use std::io::{Read, Write};
 use std::os::unix::io::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use vm_secret::VmSecret;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -86,6 +92,11 @@ const FAILURE_SERIAL_DEVICE: &str = "/dev/ttyS1";
 
 const ENCRYPTEDSTORE_BACKING_DEVICE: &str = "/dev/block/by-name/encryptedstore";
 const ENCRYPTEDSTORE_KEYSIZE: usize = 32;
+
+const SYSFS_BLOCK_DIR: &str = "/sys/block";
+const ROLE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+// When lkvm/kvmtool is used, we set VIRTIO_BLK_T_GET_ID to this fixed string for the tagged disk.
+const ENCRYPTEDSTORE_FIXED_SERIAL: &str = "encryptedstore";
 
 const DICE_CHAIN_FILE: &str = "/microdroid_resources/dice_chain.raw";
 
@@ -149,6 +160,10 @@ fn write_death_reason_to_serial(err: &Error) -> Result<()> {
 }
 
 /// The (host allocated) instance_id can be found at node /avf/untrusted/ in the device tree.
+/// Note, that in case of Arm CCA, get_instance_id() will return None, as the instance id
+/// is passed via RPV which is used by the Sealing Key derivation process in Islet RMM.
+/// Therefore, the Realm Sealing Key used as input in the DICE derivation process by microdroid_manager
+/// is already bound to the instance id and unique.
 fn get_instance_id() -> Result<Option<[u8; ID_SIZE]>> {
     let path = Path::new(INSTANCE_ID_PATH);
     let instance_id = if path.exists() {
@@ -166,7 +181,85 @@ fn get_instance_id() -> Result<Option<[u8; ID_SIZE]>> {
 }
 
 fn should_defer_rollback_protection() -> bool {
+    // Arm CCA doesn't support secretkeeper, thus we also don't support deferred rollback protection
+    if is_arm_cca_supported() {
+        return false;
+    }
     Path::new(DEFER_ROLLBACK_PROTECTION).exists()
+}
+
+fn resolve_encryptedstore_blkdevice() -> Result<Option<PathBuf>> {
+    // Preferred path (crosvm/GPT): rely on /dev/block/by-name/encryptedstore.
+    if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
+        return Ok(Some(PathBuf::from(ENCRYPTEDSTORE_BACKING_DEVICE)));
+    }
+
+    // lkvm/kvmtool path: locate the disk by virtio-blk GET_ID exposed as /sys/block/vdX/serial.
+    try_find_block_device_by_serial(ENCRYPTEDSTORE_FIXED_SERIAL, ROLE_DISCOVERY_TIMEOUT)
+}
+
+fn read_sysfs_trimmed(path: &Path) -> Option<String> {
+    fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Best-effort discovery: returns Ok(None) on timeout.
+fn try_find_block_device_by_serial(serial: &str, timeout: Duration) -> Result<Option<PathBuf>> {
+    let start = Instant::now();
+    loop {
+        let mut matches: Vec<String> = Vec::new();
+
+        for entry in fs::read_dir(SYSFS_BLOCK_DIR)
+            .with_context(|| format!("read_dir {}", SYSFS_BLOCK_DIR))?
+        {
+            let entry = entry?;
+            let name_os = entry.file_name();
+            let name = match name_os.into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            // Only consider virtio-blk (vdX) devices. This avoids accidentally matching dm/loop/etc.
+            if !name.starts_with("vd") {
+                continue;
+            }
+
+            let base = entry.path();
+            let sys_serial = read_sysfs_trimmed(&base.join("serial"))
+                .or_else(|| read_sysfs_trimmed(&base.join("device/serial")));
+
+            if let Some(sys_serial) = sys_serial {
+                if sys_serial == serial {
+                    matches.push(name);
+                }
+            }
+        }
+
+        match matches.len() {
+            1 => return Ok(Some(PathBuf::from("/dev/block").join(&matches[0]))),
+            0 => {
+                if start.elapsed() >= timeout {
+                    return Ok(None);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => bail!(
+                "Multiple /sys/block/vd* devices matched serial '{}' ({:?}); cannot disambiguate",
+                serial,
+                matches
+            ),
+        }
+    }
+}
+
+/// Strict discovery: errors if not found within the timeout.
+fn find_block_device_by_serial(serial: &str) -> Result<PathBuf> {
+    try_find_block_device_by_serial(serial, ROLE_DISCOVERY_TIMEOUT)?.ok_or_else(|| {
+        anyhow!(
+            "No /sys/block/vd* device matched serial '{}' (timeout {:?})",
+            serial,
+            ROLE_DISCOVERY_TIMEOUT
+        )
+    })
 }
 
 fn main() -> Result<()> {
@@ -193,6 +286,30 @@ fn main() -> Result<()> {
         }
         e
     })
+}
+
+fn init_net() -> Result<()> {
+    if std::path::Path::new("/sys/class/net/eth0").exists() {
+        info!("Detected network interface trying to init it");
+        let mut cmd = Command::new("/system/bin/ip");
+        cmd.args(["link", "set", "eth0", "up"]);
+        cmd.status()?;
+
+        let mut cmd = Command::new("/system/bin/dhcp");
+        cmd.args(["-s", "/system/bin/microdroid_dhcp_script"]);
+        cmd.status()?;
+    }
+
+    Ok(())
+}
+
+fn synchronize_system_time_with_ntp() -> Result<()> {
+    let mut cmd = Command::new("/system/bin/sntp");
+    // The IP address of time.android.com (note, that currently Microdroid doesn't support address resolution via DNS)
+    cmd.args(["-s", "216.239.35.0"]);
+    cmd.status()?;
+
+    Ok(())
 }
 
 fn try_main() -> Result<()> {
@@ -273,7 +390,7 @@ fn verify_payload_with_instance_img(
     // In case identity is ignored (by debug policy), we should reuse existing payload data, even
     // when the payload is changed. This is to keep the derived secret same as before.
     let instance_data = if let Some(saved_data) = saved_data {
-        if !is_verified_boot() {
+        if !is_verified_boot() && !is_arm_cca_supported() {
             if saved_data != extracted_data {
                 info!("Detected an update of the payload, but continue (regarding debug policy)")
             }
@@ -323,6 +440,14 @@ fn try_run_payload(
         MicrodroidError::PayloadInvalidConfig("No payload config in metadata".to_string())
     })?;
 
+    if is_arm_cca_supported() {
+        extend_measurements_for_payload(&instance_data)?;
+        // Display the realm config
+        display_realm_config()?;
+        // Display measurements slots
+        display_realm_measurements()?;
+    }
+
     // To minimize the exposure to untrusted data, derive dice profile as soon as possible.
     info!("DICE derivation for payload");
     let dice_artifacts = dice_derivation(dice, &instance_data, &payload_metadata)?;
@@ -340,12 +465,13 @@ fn try_run_payload(
         umount2("/microdroid_resources", MntFlags::MNT_DETACH)?;
     }
 
-    // Run encryptedstore binary to prepare the storage
-    let encryptedstore_child = if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
-        info!("Preparing encryptedstore ...");
-        Some(prepare_encryptedstore(&vm_secret).context("encryptedstore run")?)
-    } else {
-        None
+    // Run encryptedstore binary to prepare the storage (if enabled).
+    let encryptedstore_child = match resolve_encryptedstore_blkdevice()? {
+        Some(blkdevice) => {
+            info!("Preparing encryptedstore on {:?} ...", blkdevice);
+            Some(prepare_encryptedstore(&vm_secret, &blkdevice).context("encryptedstore run")?)
+        }
+        None => None,
     };
 
     let mut zipfuse = Zipfuse::default();
@@ -425,13 +551,23 @@ fn try_run_payload(
     system_properties::write("microdroid_manager.init_done", "1")
         .context("set microdroid_manager.init_done")?;
 
+    init_net()?;
+
+    // Add a delay to make sure the network interface is ready
+    std::thread::sleep(Duration::from_secs(2));
+
+    info!("Network inited");
+
+    // Synchronize time/date using NTP client
+    synchronize_system_time_with_ntp()?;
+
     info!("boot completed, time to run payload");
     exec_task(task, service).context("Failed to run payload")
 }
 
 fn post_payload_work() -> Result<()> {
     // Sync the encrypted storage filesystem (flushes the filesystem caches).
-    if Path::new(ENCRYPTEDSTORE_BACKING_DEVICE).exists() {
+    if resolve_encryptedstore_blkdevice()?.is_some() {
         let mountpoint = CString::new(ENCRYPTEDSTORE_MOUNTPOINT).unwrap();
 
         // SAFETY: `mountpoint` is a valid C string. `syncfs` and `close` are safe for any parameter
@@ -485,6 +621,10 @@ fn get_vms_rpc_binder() -> Result<Strong<dyn IVirtualMachineService>> {
 }
 
 fn is_strict_boot() -> bool {
+    // Arm CCA doesn't use strict boot
+    if is_arm_cca_supported() {
+        return false;
+    }
     Path::new(AVF_STRICT_BOOT).exists()
 }
 
@@ -609,6 +749,7 @@ fn load_config(payload_metadata: PayloadMetadata) -> Result<VmPayloadConfig> {
                 export_tombstones: None,
                 enable_authfs: false,
                 hugepages: false,
+                network: false,
             })
         }
         _ => bail!("Failed to match config against a config type."),
@@ -703,15 +844,15 @@ fn find_library_path(name: &str) -> Result<String> {
     Ok(path)
 }
 
-fn prepare_encryptedstore(vm_secret: &VmSecret) -> Result<Child> {
+fn prepare_encryptedstore(vm_secret: &VmSecret, blkdevice: &Path) -> Result<Child> {
     let mut key = ZVec::new(ENCRYPTEDSTORE_KEYSIZE)?;
     vm_secret.derive_encryptedstore_key(&mut key)?;
     let mut cmd = Command::new(ENCRYPTEDSTORE_BIN);
-    cmd.arg("--blkdevice")
-        .arg(ENCRYPTEDSTORE_BACKING_DEVICE)
+    let cmd = cmd
+        .arg("--blkdevice")
+        .arg(blkdevice)
         .arg("--key")
         .arg(hex::encode(&*key))
-        .args(["--mountpoint", ENCRYPTEDSTORE_MOUNTPOINT])
-        .spawn()
-        .context("encryptedstore failed")
+        .args(["--mountpoint", ENCRYPTEDSTORE_MOUNTPOINT]);
+    cmd.spawn().context("encryptedstore failed")
 }

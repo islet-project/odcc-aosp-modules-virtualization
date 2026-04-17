@@ -92,6 +92,7 @@ fn encryptedstore_init(blkdevice: &Path, key: &str, mountpoint: &Path) -> Result
         info!("Freshly formatting the crypt device");
         format_ext4(&crypt_device)?;
     }
+
     mount(&crypt_device, mountpoint)
         .with_context(|| format!("Unable to mount {:?}", crypt_device))?;
     if cfg!(multi_tenant) && needs_formatting {

@@ -2,20 +2,40 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
-cc_library_shared {
+cc_library {
     name: "libapkmanifest_native",
+    host_supported: true,
     defaults: ["avf_build_flags_cc"],
     srcs: ["native/*.cpp"],
-    shared_libs: [
-        "libandroidfw",
-        "libbase",
-        "liblog",
-        "libutils",
-    ],
+    target: {
+         android: {
+             shared_libs: [
+                "libandroidfw",
+                "libbase",
+                "liblog",
+                "libutils",
+             ],
+             static: {
+                 enabled: false,
+             },
+         },
+         host: {
+             whole_static_libs: [
+                "libandroidfw",
+                "libbase",
+                "liblog",
+                "libutils",
+             ],
+             shared: {
+                 enabled: false,
+             },
+         },
+     },
 }
 
 rust_bindgen {
     name: "libapkmanifest_bindgen",
+    host_supported: true,
     defaults: ["avf_build_flags_rust"],
     edition: "2021",
     wrapper_src: "native/apkmanifest.hpp",
@@ -28,6 +48,7 @@ rust_bindgen {
 
 rust_library {
     name: "libapkmanifest",
+    host_supported: true,
     crate_name: "apkmanifest",
     defaults: ["avf_build_flags_rust"],
     edition: "2021",
@@ -38,7 +59,23 @@ rust_library {
         "libapkmanifest_bindgen",
         "libscopeguard",
     ],
-    shared_libs: ["libapkmanifest_native"],
+    target: {
+         android: {
+             shared_libs: [
+                "libapkmanifest_native",
+             ],
+             static: {
+                 enabled: false,
+             },
+         },
+         host: {
+             static_libs: [
+                "libapkmanifest_native",
+                "libc++_static",
+                "libclang_rt.ubsan_minimal",
+             ],
+         },
+    },
     multilib: {
         lib32: {
             enabled: false,

@@ -2,14 +2,26 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
+filegroup {
+    name: "android.system.virtualization.payload.provisioning-src",
+    srcs: [
+        "android/system/virtualization/payload/IProvisioningCallback.aidl",
+        "android/system/virtualization/payload/ProvisioningError.aidl",
+    ],
+}
+
 aidl_interface {
     name: "android.system.virtualization.payload",
-    srcs: ["android/system/virtualization/payload/*.aidl"],
+    srcs: [
+        "android/system/virtualization/payload/IVmPayloadService.aidl",
+        ":android.system.virtualization.payload.provisioning-src"
+    ],
     imports: ["android.system.virtualizationcommon"],
     unstable: true,
     backend: {
         java: {
-            enabled: false,
+            sdk_version: "module_current",
+            enabled: true,
         },
         rust: {
             enabled: true,

@@ -1,4 +1,5 @@
 // Copyright 2023 The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,8 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Samsung's changes: add support for Islet/Arm CCA
+
 use crate::instance::{ApexData, ApkData};
 use crate::{is_debuggable, is_strict_boot, MicrodroidData};
+use crate::is_arm_cca_supported;
 use anyhow::{bail, Context, Result};
 use ciborium::{cbor, Value};
 use coset::CborSerializable;
@@ -53,9 +57,12 @@ pub fn dice_derivation(
     let debuggable = is_debuggable()?;
 
     // Send the details to diced
-    let hidden = if cfg!(llpvm_changes) {
+    let hidden = if cfg!(llpvm_changes) && !is_arm_cca_supported() {
         hidden_input_from_instance_id()?
     } else {
+        // In case of Arm CCA We use instance salt as one of  hidden input of the sealing key derivation process
+        // Note, that the instance-id is passed via Realm Personalization Value, thus the Sealing Key fetched from RMM
+        // that is used as the input to the DICE derivation process is already bound to the instance-id.
         instance_data.salt.clone().try_into().unwrap()
     };
     dice.derive(code_hash, &config_descriptor, authority_hash, debuggable, hidden)

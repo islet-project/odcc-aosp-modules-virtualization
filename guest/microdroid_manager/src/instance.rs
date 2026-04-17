@@ -1,4 +1,5 @@
 // Copyright 2021, The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// Samsung's changes: add support for Islet/Arm CCA
 
 //! Provides routines to read/write on the instance disk.
 //!
@@ -42,10 +45,14 @@ use openssl::symm::{decrypt_aead, encrypt_aead, Cipher};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Path to the instance disk inside the VM
 const INSTANCE_IMAGE_PATH: &str = "/dev/block/by-name/vm-instance";
+
+// When lkvm/kvmtool is used, we set VIRTIO_BLK_T_GET_ID to this fixed string for the tagged disk.
+const VM_INSTANCE_FIXED_SERIAL: &str = "vm-instance";
 
 /// Identifier for the key used to seal the instance data.
 const INSTANCE_KEY_IDENTIFIER: &[u8] = b"microdroid_manager_key";
@@ -84,13 +91,24 @@ struct PartitionHeader {
 type PartitionOffset = u64;
 
 impl InstanceDisk {
+    fn resolve_instance_blkdevice() -> Result<PathBuf> {
+        // Preferred path (crosvm/GPT): by-name partition symlink.
+        if Path::new(INSTANCE_IMAGE_PATH).exists() {
+            return Ok(PathBuf::from(INSTANCE_IMAGE_PATH));
+        }
+        // lkvm/kvmtool path: locate the disk by virtio-blk GET_ID exposed as /sys/block/vdX/serial.
+        crate::find_block_device_by_serial(VM_INSTANCE_FIXED_SERIAL)
+    }
+
     /// Creates handle to instance disk
     pub fn new() -> Result<Self> {
+        let instance_path = Self::resolve_instance_blkdevice()?;
+        log::info!("Preparing vm-instance on {:?} ...", instance_path);
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(INSTANCE_IMAGE_PATH)
-            .with_context(|| format!("Failed to open {}", INSTANCE_IMAGE_PATH))?;
+            .open(&instance_path)
+            .with_context(|| format!("Failed to open {:?}", instance_path))?;
 
         // Check if this file is a valid instance disk by examining the header (the first block)
         let mut magic = [0; DISK_HEADER_MAGIC.len()];

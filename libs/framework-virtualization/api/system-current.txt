@@ -62,7 +62,9 @@ package android.system.virtualmachine {
     method @IntRange(from=0) public long getEncryptedStorageBytes();
     method @IntRange(from=0) public long getMemoryBytes();
     method @Nullable public String getPayloadBinaryName();
+    method @FlaggedApi("com.android.system.virtualmachine.flags.avf_v_test_apis") @Nullable @RequiresPermission(android.system.virtualmachine.VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION) public String getPayloadConfigPath();
     method public boolean isCompatibleWith(@NonNull android.system.virtualmachine.VirtualMachineConfig);
+    method @FlaggedApi("com.android.system.virtualmachine.flags.avf_v_test_apis") @RequiresPermission(android.system.virtualmachine.VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION) public boolean isConnectVmConsole();
     method public boolean isEncryptedStorageEnabled();
     method public boolean isProtectedVm();
     method public boolean isVmOutputCaptured();
@@ -76,11 +78,13 @@ package android.system.virtualmachine {
     ctor public VirtualMachineConfig.Builder(@NonNull android.content.Context);
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig build();
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig.Builder setApkPath(@NonNull String);
+    method @FlaggedApi("com.android.system.virtualmachine.flags.avf_v_test_apis") @NonNull @RequiresPermission(android.system.virtualmachine.VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION) public android.system.virtualmachine.VirtualMachineConfig.Builder setConnectVmConsole(boolean);
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig.Builder setCpuTopology(int);
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig.Builder setDebugLevel(int);
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig.Builder setEncryptedStorageBytes(@IntRange(from=1) long);
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig.Builder setMemoryBytes(@IntRange(from=1) long);
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig.Builder setPayloadBinaryName(@NonNull String);
+    method @FlaggedApi("com.android.system.virtualmachine.flags.avf_v_test_apis") @NonNull @RequiresPermission(android.system.virtualmachine.VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION) public android.system.virtualmachine.VirtualMachineConfig.Builder setPayloadConfigPath(@NonNull String);
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig.Builder setProtectedVm(boolean);
     method @NonNull public android.system.virtualmachine.VirtualMachineConfig.Builder setVmOutputCaptured(boolean);
   }

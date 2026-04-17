@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2021 The Android Open Source Project
+ * Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,13 +15,18 @@
  * limitations under the License.
  */
 
+// Samsung's changes: add support for running Java CC Services
+
 #include <android-base/logging.h>
 #include <android-base/result.h>
+#include <android/log.h>
 #include <android/dlext.h>
 #include <dlfcn.h>
+#include <locale.h>
 
 #include <cstdlib>
 #include <iostream>
+#include <locale>
 #include <string>
 
 #include "vm_main.h"
@@ -43,6 +49,8 @@ extern struct android_namespace_t* android_create_namespace(
 extern bool android_link_namespaces(struct android_namespace_t* from,
                                     struct android_namespace_t* to,
                                     const char* shared_libs_sonames);
+
+extern struct android_namespace_t* android_get_exported_namespace(const char* name);
 } // extern "C"
 
 static Result<void*> load(const std::string& libname);
@@ -51,7 +59,10 @@ constexpr char entrypoint_name[] = "AVmPayload_main";
 
 static constexpr const char* kAllowedLibs[] = {
         "libc.so",   "libm.so",          "libdl.so",         "libdl_android.so",
+        "libutils.so", "libcutils.so", "libandroidicu.so",
         "liblog.so", "libvm_payload.so", "libbinder_ndk.so", "libbinder_rpc_unstable.so",
+        "libz.so", "heapprofd_client_api.so", "libartpalette-system.so",
+        "libart.so", "libopenjdk.so", "libopenjdkjvm.so", "libartpalette.so"
 };
 
 int main(int argc, char* argv[]) {
@@ -60,6 +71,20 @@ int main(int argc, char* argv[]) {
         std::cout << "    " << argv[0] << " LIBNAME\n";
         return EXIT_FAILURE;
     }
+
+    // Set the locale for all C and C++ functions to the minimal "C" locale.
+    // This must be done before any library that depends on locale is loaded
+    // or any locale-dependent static objects are initialized.
+    //setlocale(LC_ALL, "C.UTF-8");
+
+    std::locale loc("C.UTF-8");
+    std::locale old_locale = std::locale::global(loc);
+
+    LOG(ERROR) << "Old locale " << old_locale.name();
+
+    setlocale(LC_ALL, "C.UTF-8");
+
+    use_facet<std::ctype<char>>(std::locale("C"));
 
     android::base::InitLogging(argv);
 
@@ -86,9 +111,13 @@ Result<void*> load(const std::string& libname) {
     // Parent as nullptr means the default namespace
     android_namespace_t* parent = nullptr;
     // The search paths of the new namespace are isolated to restrict system private libraries.
-    const uint64_t type = ANDROID_NAMESPACE_TYPE_ISOLATED;
+    // XXX ANDROID_NAMESPACE_TYPE_ISOLATED
+    const uint64_t type = ANDROID_NAMESPACE_TYPE_SHARED;
+
     // The directory of the library is appended to the search paths
-    const std::string libdir = libname.substr(0, libname.find_last_of("/"));
+    std::string libdir = libname.substr(0, libname.find_last_of("/"));
+    // TODO: fix this
+    libdir += ":/apex/com.android.art/lib64/:/apex/com.android.os.statsd/lib64/:/apex/com.android.i18n/lib64/";
     const char* ld_library_path = libdir.c_str();
     const char* default_library_path = libdir.c_str();
 
@@ -108,13 +137,23 @@ Result<void*> load(const std::string& libname) {
         return Error() << "Failed to link namespace: " << dlerror();
     }
 
+
+    android_namespace_t* art_namespace = android_get_exported_namespace("com_android_art");
+    if (art_namespace == nullptr) {
+        __android_log_print(ANDROID_LOG_WARN, "microdroid_launcher", "The com_android_art namespace is not exported");
+    } else {
+        if (!android_link_namespaces(art_namespace, new_ns, libs.c_str())) {
+            return Error() << "Failed to link namespace: " << dlerror();
+        }
+    }
+
     const android_dlextinfo info = {
             .flags = ANDROID_DLEXT_USE_NAMESPACE,
             .library_namespace = new_ns,
     };
-    if (auto ret = android_dlopen_ext(libname.c_str(), RTLD_NOW, &info); ret) {
+    if (auto ret = android_dlopen_ext(libname.c_str(), RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE, &info); ret) {
         return ret;
     } else {
-        return Error() << "Failed to dlopen: " << dlerror();
+        return Error() << "Failed to dlopen payload: " << dlerror();
     }
 }

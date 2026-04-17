@@ -1,0 +1,42 @@
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+cc_prebuilt_binary {
+    name: "lkvm_rim_measurer_static",
+    host_supported: true,
+    device_supported: false,
+    srcs: ["prebuilt/lkvm-rim-measurer-static"],
+    strip: {
+        none: true,
+    }
+}
+
+cc_prebuilt_binary {
+    name: "realm_metadata_tool",
+    host_supported: true,
+    device_supported: false,
+    srcs: ["prebuilt/realm-metadata-tool"],
+    strip: {
+        none: true,
+    }
+}
+
+cc_prebuilt_binary {
+    name: "rsictl",
+    host_supported: false,
+    device_supported: true,
+    srcs: ["prebuilt/rsictl"],
+    strip: {
+        none: true,
+    }
+}
+
+cc_prebuilt_binary {
+    name: "ratls_get",
+    host_supported: false,
+    device_supported: true,
+    srcs: ["prebuilt/ratls-get"],
+    strip: {
+        none: true,
+    }
+}

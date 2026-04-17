@@ -10,6 +10,8 @@ service microdroid_manager /system/bin/microdroid_manager
     # CAP_SYS_BOOT is required to exec kexecload from microdroid_manager
     # CAP_SETPCAP is required to allow microdroid_manager to drop capabilities
     #   before executing the payload
-    capabilities AUDIT_CONTROL SYS_ADMIN SYS_BOOT SETPCAP SETUID SETGID
+    # CAP_CHOWN is required to allow microdroid_manager to change an owner of provisioned files
+    # CAP_SYS_TIME is required to set the system time (current time is needed to verify certificates by RA-TLS client)
+    capabilities AUDIT_CONTROL SYS_ADMIN SYS_BOOT SETPCAP SETUID SETGID NET_ADMIN NET_RAW CHOWN SYS_TIME
     user root
     socket vm_payload_service stream 0666 system system

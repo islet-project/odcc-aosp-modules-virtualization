@@ -1,4 +1,5 @@
 // Copyright 2023 The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Samsung's changes: add support for Islet/Arm CCA
+
 use crate::instance::{ApexData, ApkData, MicrodroidData};
+use crate::is_arm_cca_supported;
 use crate::payload::{get_apex_data_from_payload, to_metadata};
 use crate::{is_strict_boot, MicrodroidError};
 use anyhow::{anyhow, ensure, Context, Result};
@@ -167,8 +171,11 @@ pub fn verify_payload(
     // because we have fully verified the APK signature (and apkdmverity checks all the data we
     // verified is consistent with the root hash) or because we have the saved APK data which will
     // be checked as identical to the data we have verified.
+    // In case of Arm CCA we use per-instance salt. It is an additional layer of protection,
+    // as the instance data is already encrypted using a unique per instance sealing key (Islet RMM uses
+    // RPV as one of the inputs of the sealing key derivation process for confindential services, where RPV is instance-id)
 
-    let salt = if cfg!(llpvm_changes) || is_strict_boot() {
+    let salt = if (cfg!(llpvm_changes) || is_strict_boot()) && (!is_arm_cca_supported()) {
         // Salt is obsolete with llpvm_changes.
         vec![0u8; 64]
     } else if let Some(saved_data) = saved_data {

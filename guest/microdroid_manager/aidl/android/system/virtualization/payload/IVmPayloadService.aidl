@@ -1,5 +1,6 @@
 /*
  * Copyright 2022 The Android Open Source Project
+ * Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +15,12 @@
  * limitations under the License.
  */
 
+// Samsung's changes: add support for Islet/Arm CCA
+
 package android.system.virtualization.payload;
 
 import android.system.virtualizationcommon.Certificate;
+import android.system.virtualization.payload.IProvisioningCallback;
 
 /**
  * This interface regroups the tasks that payloads delegate to
@@ -27,11 +31,23 @@ interface IVmPayloadService {
     /** Failed to prepare the CSR and key pair for attestation. */
     const int STATUS_FAILED_TO_PREPARE_CSR_AND_KEY = 1;
 
+    /** Failed to request the Arm CCA attestaton token. */
+    const int STATUS_FAILED_TO_REQUEST_ARM_CCA_ATTESTATION_TOKEN = 2;
+
+    /** Failed to extend REM slot */
+    const int STATUS_FAILED_TO_EXTEND_ARM_CCA_REM_SLOT = 3;
+
     /** Socket name of the service IVmPayloadService. */
     const String VM_PAYLOAD_SERVICE_SOCKET_NAME = "vm_payload_service";
 
     /** Path to the APK contents path. */
     const String VM_APK_CONTENTS_PATH = "/mnt/apk";
+
+    /** The length of Arm CCA challenge. */
+    const int ARM_CCA_CHALLENGE_LEN = 64;
+
+    /** The maximum length of Arm CCA measurement */
+    const int ARM_CCA_MAX_MEASUREMENT_LEN = 64;
 
     /**
      * Path to the encrypted storage. Note the path will not exist if encrypted storage
@@ -116,4 +132,46 @@ interface IVmPayloadService {
      *         certification chain.
      */
     AttestationResult requestAttestation(in byte[] challenge, in boolean testMode);
+
+    /**
+     * Requests the Arm CCA attestation token.
+     *
+     * The challenge will be included in the Realm token in the attestation result,
+     * serving as proof of the freshness of the result.
+     *
+     * @param challenge size is 64 bytes.
+     *
+     * @return the raw Arm CCA attestation token
+     */
+    byte[] requestArmCcaAttestation(in byte[ARM_CCA_CHALLENGE_LEN] challenge);
+
+    /**
+     * Extends the measurement of provided Arm CCA REM slot.
+     *
+     * The measurement will be used to extend the content of REM slot.
+     * The content of REMs is reflected in the Realm attestation token.
+     *
+     * @param index The index of REM slot
+     * @param measurement size cannot exceed 64 bytes.
+     */
+    void extendArmCcaRemSlot(in int index, in byte[] measurement);
+
+
+    /**
+     * Starts the remote provisioning operation.
+     *
+     * The provisioning process involves a Provisioning Client that is respobsible for
+     * setup of the RA-TLS (Remote Attestation + TLS) secure channel with the remote
+     * Provisioning Server. Once the channel is established, the client downloads the
+     * file pointed by the url into the destination path. Once the operation finishes
+     * the client is notified via the callback inteface.
+     *
+     * @param the url of the provisioned resource
+     * @param caCertPath the relative path to the Root CA Certificate used to authenticate the provisioning Server
+     *                   Note, that it is relative to <apk root path>/assets folder.
+     * @param destination the relative path of the downloaded file. The path is relative to encryptedstore mountpoint.
+     * @param callback The reference to the implementation of IProvisioningCallback.Stub used to notify the client
+     *                 about the status of the operation
+     */
+    void startProvisioning(String url, String caCertPath, String destination, IProvisioningCallback callback);
 }

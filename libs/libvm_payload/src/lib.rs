@@ -1,4 +1,5 @@
 // Copyright 2022, The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,16 +13,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Samsung's changes: add support for Islet/Arm CCA
+
 //! This module handles the interaction with virtual machine payload service.
 
 use android_system_virtualization_payload::aidl::android::system::virtualization::payload:: IVmPayloadService::{
     IVmPayloadService, ENCRYPTEDSTORE_MOUNTPOINT, VM_APK_CONTENTS_PATH,
     VM_PAYLOAD_SERVICE_SOCKET_NAME, AttestationResult::AttestationResult,
 };
+use android_system_virtualization_payload::aidl::android::system::virtualization::payload::IProvisioningCallback::IProvisioningCallback;
 use anyhow::{bail, ensure, Context, Result};
 use binder::{
     unstable_api::{new_spibinder, AIBinder},
-    Strong, ExceptionCode,
+    Strong, ExceptionCode
 };
 use log::{error, info, LevelFilter};
 use rpcbinder::{RpcServer, RpcSession};
@@ -37,7 +41,10 @@ use std::sync::{
     LazyLock,
     Mutex,
 };
-use vm_payload_status_bindgen::AVmAttestationStatus;
+use vm_payload_api_bindgen::AVmAttestationStatus;
+use vm_payload_api_bindgen::AVmMeasurementExtendStatus;
+use vm_payload_api_bindgen::AVmMeasurementSlotIndex;
+use vm_payload_api_bindgen::AVmStartProvisioningStatus;
 
 /// Maximum size of an ECDSA signature for EC P-256 key is 72 bytes.
 const MAX_ECDSA_P256_SIGNATURE_SIZE: usize = 72;
@@ -57,7 +64,10 @@ fn get_vm_payload_service() -> Result<Strong<dyn IVmPayloadService>> {
     if let Some(strong) = &*connection {
         Ok(strong.clone())
     } else {
-        let new_connection: Strong<dyn IVmPayloadService> = RpcSession::new()
+        let rpc_session = RpcSession::new();
+        // Allow the VM payload service to call callbacks passed by the client as IBinder references
+        rpc_session.set_max_incoming_threads(1);
+        let new_connection: Strong<dyn IVmPayloadService> = rpc_session
             .setup_unix_domain_client(VM_PAYLOAD_SERVICE_SOCKET_NAME)
             .context(format!("Failed to connect to service: {}", VM_PAYLOAD_SERVICE_SOCKET_NAME))?;
         *connection = Some(new_connection.clone());
@@ -564,5 +574,189 @@ pub extern "C" fn AVmPayload_getEncryptedStoragePath() -> *const c_char {
         VM_ENCRYPTED_STORAGE_PATH_C.as_ptr()
     } else {
         ptr::null()
+    }
+}
+
+/// Requests the Arm CCA attestation token.
+///
+/// # Safety
+///
+/// Behavior is undefined if any of the following conditions are violated:
+///
+/// * `challenge` must be [valid] for reads of `challenge_size` bytes.
+///
+/// [valid]: ptr#safety
+#[no_mangle]
+pub unsafe extern "C" fn AVmPayload_requestArmCcaAttestation(
+    challenge: *const u8,
+    challenge_size: usize,
+    evidence: &mut *mut u8,
+    evidence_size: &mut usize,
+) -> AVmAttestationStatus {
+    initialize_logging();
+    const ARM_CCA_CHALLENGE_SIZE: usize = 64;
+    if challenge.is_null() || challenge_size != ARM_CCA_CHALLENGE_SIZE {
+        return AVmAttestationStatus::ATTESTATION_ERROR_INVALID_CHALLENGE;
+    }
+
+    // SAFETY: The caller guarantees that `challenge` is valid for reads
+    let slice = unsafe { std::slice::from_raw_parts(challenge, challenge_size) };
+    let cca_challenge: &[u8; 64] = match slice.try_into() {
+        Ok(arr_ref) => arr_ref,
+        Err(e) => {
+            error!("Could not convert the challenge slice: {e:?}");
+            return AVmAttestationStatus::ATTESTATION_ERROR_INVALID_CHALLENGE;
+        },
+    };
+
+    let service = unwrap_or_abort(get_vm_payload_service());
+    match service.requestArmCcaAttestation(cca_challenge) {
+        Ok(attestation_res) => {
+            let boxed: Box<[u8]> = attestation_res.into_boxed_slice();
+            *evidence_size = boxed.len();
+            *evidence = Box::into_raw(boxed) as *mut u8;
+            AVmAttestationStatus::ATTESTATION_OK
+        }
+        Err(e) => {
+            error!("Arm CCA remote attestation failed: {e:?}");
+            binder_status_to_attestation_status(e)
+        }
+    }
+}
+
+/// Extends Arm CCA REM slot.
+///
+/// # Safety
+///
+/// Behavior is undefined if any of the following conditions are violated:
+///
+/// * `measurement` must be [valid] for reads of `measurement_size` bytes.
+///
+/// [valid]: ptr#safety
+#[no_mangle]
+pub unsafe extern "C" fn AVmPayload_measurementExtend(
+    index: AVmMeasurementSlotIndex,
+    measurement: *const u8,
+    measurement_size: usize,
+) -> AVmMeasurementExtendStatus {
+    initialize_logging();
+    const ARM_CCA_MAX_MEASUREMENT_SIZE: usize = 64;
+    if measurement.is_null() || measurement_size > ARM_CCA_MAX_MEASUREMENT_SIZE {
+        return AVmMeasurementExtendStatus::MEASUREMENT_EXTEND_ERROR_INVALID_MEASUREMENT;
+    }
+
+    // SAFETY: The caller guarantees that `measurement` is valid for reads
+    let measurement = unsafe { std::slice::from_raw_parts(measurement, measurement_size) };
+
+    let service = unwrap_or_abort(get_vm_payload_service());
+    match service.extendArmCcaRemSlot(index as i32, measurement) {
+        Ok(_) => {
+            AVmMeasurementExtendStatus::MEASUREMENT_EXTEND_OK
+        }
+        Err(e) => {
+            error!("Arm CCA measurement extend has failed: {e:?}");
+            binder_status_to_measurement_status(e)
+        }
+    }
+
+}
+
+
+fn binder_status_to_measurement_status(status: binder::Status) -> AVmMeasurementExtendStatus {
+    match status.exception_code() {
+        ExceptionCode::UNSUPPORTED_OPERATION => AVmMeasurementExtendStatus::MEASUREMENT_EXTEND_ERROR_UNSUPPORTED,
+        ExceptionCode::ILLEGAL_ARGUMENT => AVmMeasurementExtendStatus::MEASUREMENT_EXTEND_ERROR_INVALID_MEASUREMENT,
+        _ => AVmMeasurementExtendStatus::MEASUREMENT_EXTEND_ERROR_FAILED_TO_EXTEND_ARM_CCA_REM_SLOT,
+    }
+}
+
+/// Starts provisioning process
+///
+/// # Safety
+///
+/// Behavior is undefined if any of the following conditions are violated:
+///
+/// * `url` must be [valid] for reads and must be a C string that end with '\0'.
+/// * `ca_cert_path` must be [valid] for reads and must be a C string that end with '\0'.
+/// * `destination` must be [valid] for reads and must be a C string that end with '\0'.
+/// * `callback` must be [valid] for reads.
+///
+/// [valid]: ptr#safety
+#[no_mangle]
+pub unsafe extern "C" fn AVmPayload_startProvisioning(
+    url: *const c_char,
+    ca_cert_path: *const c_char,
+    destination: *const c_char,
+    callback: *mut AIBinder,
+) -> AVmStartProvisioningStatus {
+    initialize_logging();
+
+    if url.is_null() || ca_cert_path.is_null() || destination.is_null() || callback.is_null() {
+        error!("At least one parameter is nullptr!");
+        return AVmStartProvisioningStatus::PROVISIONING_ERROR_INVALID_PARAMS;
+    }
+
+    // SAFETY: See the requirements on `url` above.
+    let url_str = unsafe { CStr::from_ptr(url) };
+    let url_str = match url_str.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Error while converting url_str {e:?}");
+            return AVmStartProvisioningStatus::PROVISIONING_ERROR_INVALID_PARAMS;
+        }
+    };
+
+    // SAFETY: See the requirements on `ca_cert_path` above.
+    let ca_cert_path_str = unsafe { CStr::from_ptr(ca_cert_path) };
+    let ca_cert_path_str = match ca_cert_path_str.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Error while converting ca_cert_path_str {e:?}");
+            return AVmStartProvisioningStatus::PROVISIONING_ERROR_INVALID_PARAMS;
+        }
+    };
+
+    // SAFETY: See the requirements on `destination` above.
+    let destination_str = unsafe { CStr::from_ptr(destination) };
+    let destination_str = match destination_str.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Error while converting destination_str {e:?}");
+            return AVmStartProvisioningStatus::PROVISIONING_ERROR_INVALID_PARAMS;
+        }
+    };
+
+    // SAFETY: AIBinder returned has correct reference count, and the ownership can
+    // safely be taken by new_spibinder.
+    let callback = unsafe { new_spibinder(callback) }; // SpIBinder
+    if let Some(callback) = callback {
+        let callback_proxy = match callback.into_interface::<dyn IProvisioningCallback>() {
+            Ok(proxy) => proxy,
+            Err(e) => {
+                error!("Error while converting the SpIBinder to IProvisioningCallback {e:?}");
+                return AVmStartProvisioningStatus::PROVISIONING_ERROR_INVALID_PARAMS;
+            }
+        };
+
+        let service = unwrap_or_abort(get_vm_payload_service());
+        match service.startProvisioning(url_str, ca_cert_path_str, destination_str, &callback_proxy) {
+            Ok(_) => {
+                AVmStartProvisioningStatus::PROVISIONING_START_OK
+            }
+            Err(e) => {
+                error!("Start provisioning operation has failed: {e:?}");
+                binder_status_to_start_provisioning_status(e)
+            }
+        }
+    } else {
+        AVmStartProvisioningStatus::PROVISIONING_ERROR_UNSUPPORTED
+    }
+}
+
+fn binder_status_to_start_provisioning_status(status: binder::Status) -> AVmStartProvisioningStatus {
+    match status.exception_code() {
+        ExceptionCode::UNSUPPORTED_OPERATION => AVmStartProvisioningStatus::PROVISIONING_ERROR_UNSUPPORTED,
+        ExceptionCode::ILLEGAL_ARGUMENT => AVmStartProvisioningStatus::PROVISIONING_ERROR_INVALID_PARAMS,
+        _ => AVmStartProvisioningStatus::PROVISIONING_ERROR_UNSUPPORTED,
     }
 }

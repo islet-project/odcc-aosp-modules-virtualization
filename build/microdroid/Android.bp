@@ -5,6 +5,8 @@ package {
 microdroid_shell_and_utilities = [
     "reboot",
     "sh",
+    "ip",
+    "ping",
     "strace",
     "toolbox",
     "toybox",
@@ -44,6 +46,18 @@ microdroid_symlinks = [
     },
 ]
 
+cc_prebuilt_binary {
+    name: "microdroid_dhcp_script",
+    srcs: [ "dhcp.script" ]
+}
+
+prebuilt_etc {
+    name: "public.libraries.microandroid.txt",
+    src: "public.libraries.microandroid.txt",
+    filename: "public.libraries.txt",
+    no_full_install: true,
+}
+
 android_system_image {
     name: "microdroid",
     use_avb: true,
@@ -75,7 +89,7 @@ android_system_image {
         "linker",
         "cgroups.json",
         "task_profiles.json",
-        "public.libraries.android.txt",
+        "public.libraries.microandroid.txt",
 
         "microdroid_event-log-tags",
         "microdroid_file_contexts",
@@ -93,6 +107,11 @@ android_system_image {
         "traced",
         "traced_probes",
         "perfetto",
+        "microdroid_dhcp_script",
+
+        // provisioning binaries
+        "rsictl",
+        "ratls_get",
     ] + select(release_flag("RELEASE_AVF_ENABLE_MULTI_TENANT_MICRODROID_VM"), {
         true: [
             "microdroid_etc_passwd",

@@ -15,6 +15,9 @@ LIBVM_PAYLOAD {
     AVmAttestationStatus_toString;       # systemapi introduced=VanillaIceCream
     AVmAttestationResult_getCertificateCount; # systemapi introduced=VanillaIceCream
     AVmAttestationResult_getCertificateAt; # systemapi introduced=VanillaIceCream
+    AVmPayload_requestArmCcaAttestation; # systemapi introduced=VanillaIceCream
+    AVmPayload_measurementExtend; # systemapi introduced=VanillaIceCream
+    AVmPayload_startProvisioning; # systemapi introduced=VanillaIceCream
   local:
     *;
 };

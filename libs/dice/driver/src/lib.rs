@@ -1,4 +1,5 @@
 // Copyright 2022, The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// Samsung's changes: add support for Islet/Arm CCA
 
 //! Logic for handling the DICE values and boot operations.
 
@@ -29,6 +32,8 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::slice;
+
+const ARM_CCA_MICRODROID_SEALING_KEY: &str = "/microdroid_resources/microdroid_sealing_key.txt";
 
 /// Artifacts that are mapped into the process address space from the driver.
 pub enum DiceDriver<'a> {
@@ -66,13 +71,30 @@ impl DiceDriver<'_> {
     /// Creates a new dice driver from the given driver_path.
     pub fn new(driver_path: &Path, is_strict_boot: bool) -> Result<Self> {
         log::info!("Creating DiceDriver backed by {driver_path:?} driver");
-        if driver_path.exists() {
+
+        // When Arm CCA is enabled, firstly the core init process retrieves a unique Realm Sealing Key from RMM.
+        // It reads the authority data from the Microdroid system image and uses all that data to derive
+        // the Sealing Key for Microdroid, which is then saved into a file at ARM_CCA_MICRODROID_SEALING_KEY location.
+        //
+        // Here, the saved Microdroid Sealing Key is read and then used as cdi_seal input for the sealing key derivation process
+        // implemented at diced_sample_inputs::make_sample_bcc_and_cdis.
+        // In case of Arm CCA only the CDI sealing key derivation path is utilized as the attestation evidence is
+        // generated directly by RMM. The produced CDI seal is used by the microdroid_manager to derive CDI seal for the
+        // confidential payload (using authority data of the mounted APK/APEX files).
+        let sealing_key_path = Path::new(ARM_CCA_MICRODROID_SEALING_KEY);
+        if sealing_key_path.exists() {
+            log::warn!("Using sample DICE values together with Arm CCA sealing key");
+            let dice_artifacts = diced_sample_inputs::make_sample_bcc_and_cdis(Some(sealing_key_path))
+                .expect("Failed to create sample dice artifacts.");
+            return Ok(Self::Fake(dice_artifacts));
+        }
+        else if driver_path.exists() {
             log::info!("Using DICE values from driver");
         } else if is_strict_boot {
             bail!("Strict boot requires DICE value from driver but none were found");
         } else {
             log::warn!("Using sample DICE values");
-            let dice_artifacts = diced_sample_inputs::make_sample_bcc_and_cdis()
+            let dice_artifacts = diced_sample_inputs::make_sample_bcc_and_cdis(None)
                 .expect("Failed to create sample dice artifacts.");
             return Ok(Self::Fake(dice_artifacts));
         };

@@ -1,0 +1,20 @@
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+rust_library {
+    name: "librsi",
+    crate_name: "rsi",
+    defaults: ["avf_build_flags_rust"],
+    srcs: ["src/lib.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libnix",
+        "libciborium",
+        "libcoset",
+        "libhex",
+        "libring",
+    ],
+    apex_available: [
+        "com.android.virt",
+    ],
+}

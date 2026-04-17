@@ -56,6 +56,10 @@ pub struct VmPayloadConfig {
     /// https://docs.kernel.org/admin-guide/mm/transhuge.html
     #[serde(default)]
     pub hugepages: bool,
+
+    /// Whether to enable networking support
+    #[serde(default)]
+    pub network: bool,
 }
 
 /// OS config

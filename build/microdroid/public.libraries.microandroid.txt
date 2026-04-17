@@ -1,0 +1,4 @@
+/system/lib64/libc++.so
+/system/lib64/libc.so
+/system/lib64/libdl.so
+/system/lib64/libbase.so

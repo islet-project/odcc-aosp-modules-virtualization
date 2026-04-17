@@ -1,0 +1,31 @@
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+rust_library {
+    name: "librmm_measure",
+    host_supported: true,
+    crate_name: "rmm_measure",
+    defaults: ["avf_build_flags_rust"],
+    srcs: ["src/lib.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libhex",
+        "libring",
+    ],
+    apex_available: [
+        "com.android.virt",
+    ],
+}
+
+rust_test {
+    name: "lib_rmm_measure_test",
+    crate_name: "rmm_measure",
+    defaults: ["avf_build_flags_rust"],
+    srcs: ["src/lib.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libhex",
+        "libring",
+    ],
+    test_suites: ["general-tests"],
+}

@@ -1,4 +1,5 @@
 // Copyright 2021, The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,8 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Samsung's changes: add support for Islet/Arm CCA
+
 //! Payload disk image
 
+use crate::properties::use_kvmtool;
 use crate::debug_config::DebugConfig;
 use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
     DiskImage::DiskImage,
@@ -457,27 +461,56 @@ pub fn add_microdroid_system_images(
     let initrd = format!("/apex/com.android.virt/etc/{os_name}_initrd_{debug_suffix}.img");
     vm_config.initrd = Some(open_parcel_file(Path::new(&initrd), false)?);
 
-    let mut writable_partitions = vec![Partition {
-        label: "vm-instance".to_owned(),
-        image: Some(ParcelFileDescriptor::new(instance_file)),
-        writable: true,
-        guid: None,
-    }];
+    if storage_image.is_some() && use_kvmtool() {
+        let encryptedstore_file = storage_image.unwrap();
+        // When enabled, put vm-instance and encryptedstore into separate DiskImages, each with a
+        // single labeled partition. With `direct_system_disks` enabled, virtmgr can pass the
+        // partition image file directly to the VMM (no composite/GPT wrapper), allowing the VMM to
+        // update the underlying instance.img/storage.img.
+        vm_config.disks.push(DiskImage {
+            image: None,
+            partitions: vec![Partition {
+                label: "vm-instance".to_owned(),
+                image: Some(ParcelFileDescriptor::new(instance_file)),
+                writable: true,
+                guid: None,
+            }],
+            writable: true,
+        });
 
-    if let Some(file) = storage_image {
-        writable_partitions.push(Partition {
-            label: "encryptedstore".to_owned(),
-            image: Some(ParcelFileDescriptor::new(file)),
+        vm_config.disks.push(DiskImage {
+            image: None,
+            partitions: vec![Partition {
+                label: "encryptedstore".to_owned(),
+                image: Some(ParcelFileDescriptor::new(encryptedstore_file)),
+                writable: true,
+                guid: None,
+            }],
+            writable: true,
+        });
+    } else {
+        let mut writable_partitions = vec![Partition {
+            label: "vm-instance".to_owned(),
+            image: Some(ParcelFileDescriptor::new(instance_file)),
             writable: true,
             guid: None,
+        }];
+
+        if let Some(file) = storage_image {
+            writable_partitions.push(Partition {
+                label: "encryptedstore".to_owned(),
+                image: Some(ParcelFileDescriptor::new(file)),
+                writable: true,
+                guid: None,
+            });
+        }
+
+        vm_config.disks.push(DiskImage {
+            image: None,
+            partitions: writable_partitions,
+            writable: true,
         });
     }
-
-    vm_config.disks.push(DiskImage {
-        image: None,
-        partitions: writable_partitions,
-        writable: true,
-    });
 
     Ok(())
 }

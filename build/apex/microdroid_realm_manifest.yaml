@@ -1,0 +1,5 @@
+realm_id: "com.microdroid.realm"
+version: "1.0.0"
+svn: 1
+rim: "{RIM}"
+hash_algo: SHA256

@@ -1,4 +1,5 @@
 // Copyright 2021, The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,16 +13,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Samsung's changes: add support for running kvmtool for use with Islet/Arm CCA
+
 //! Implementation of the AIDL interface of the VirtualizationService.
 
 use crate::{get_calling_pid, get_calling_uid, get_this_pid};
 use crate::atom::{write_vm_booted_stats, write_vm_creation_stats};
 use crate::composite::make_composite_image;
-use crate::crosvm::{AudioConfig, CrosvmConfig, DiskFile, DisplayConfig, GpuConfig, InputDeviceOption, PayloadState, UsbConfig, VmContext, VmInstance, VmState};
+use crate::crosvm::{AudioConfig, CommonVmConfig, CommonVmInstance, DiskFile, DisplayConfig, GpuConfig, InputDeviceOption, PayloadState, UsbConfig, VmContext, VmState};
 use crate::debug_config::DebugConfig;
 use crate::dt_overlay::{create_device_tree_overlay, VM_DT_OVERLAY_MAX_SIZE, VM_DT_OVERLAY_PATH};
 use crate::payload::{add_microdroid_payload_images, add_microdroid_system_images, add_microdroid_vendor_image};
 use crate::selinux::{getfilecon, SeContext};
+use crate::properties::use_kvmtool;
 use android_os_permissions_aidl::aidl::android::os::IPermissionController;
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::{
     Certificate::Certificate,
@@ -92,6 +96,7 @@ use vbmeta::VbMetaImage;
 use vmconfig::{VmConfig, get_debug_level};
 use vsock::VsockStream;
 use zip::ZipArchive;
+use crate::common::DiskRole;
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
 pub type Cid = u32;
@@ -491,6 +496,8 @@ impl VirtualizationService {
 
         check_config_features(config)?;
 
+        let instance_id = extract_instance_id(config);
+
         if cfg!(early) {
             check_config_allowed_for_early_vms(config)?;
         }
@@ -576,6 +583,16 @@ impl VirtualizationService {
 
         let kernel = maybe_clone_file(&config.kernel)?;
         let initrd = maybe_clone_file(&config.initrd)?;
+
+        // Open the metadata file for Realm VMs
+        let metadata_path = Path::new("/apex/com.android.virt/etc/fs/microdroid_realm_metadata.bin");
+        let metadata = if metadata_path.exists() {
+            Some(File::open(metadata_path)
+                .with_context(|| format!("Failed to open metadata file {:?}", metadata_path))
+                .or_service_specific_exception(-1)?)
+        } else {
+            None
+        };
 
         if config.protectedVm {
             // In a protected VM, we require custom kernels to come from a trusted source
@@ -705,12 +722,13 @@ impl VirtualizationService {
             .or_binder_exception(ExceptionCode::BAD_PARCELABLE)?;
 
         // Actually start the VM.
-        let crosvm_config = CrosvmConfig {
+        let crosvm_config = CommonVmConfig {
             cid,
             name: config.name.clone(),
             bootloader: maybe_clone_file(&config.bootloader)?,
             kernel,
             initrd,
+            metadata,
             disks,
             params: config.params.to_owned(),
             protected: *is_protected,
@@ -744,9 +762,10 @@ impl VirtualizationService {
             audio_config,
             no_balloon: config.noBalloon,
             usb_config,
+            instance_id,
         };
         let instance = Arc::new(
-            VmInstance::new(
+            CommonVmInstance::new(
                 crosvm_config,
                 temporary_directory,
                 requester_uid,
@@ -958,6 +977,27 @@ fn assemble_disk_image(
     next_temporary_image_id: &mut u64,
     indirect_files: &mut Vec<File>,
 ) -> Result<DiskFile, Status> {
+    // When using encrypted storage with kvmtool, special single-partition disks (vm-instance /
+    // encryptedstore) are passed through directly as raw disk images (no composite/GPT
+    // wrapper). This is primarily useful for VMMs that can't consume the crosvm composite image
+    // format but still need writes to land in the underlying instance.img/storage.img.
+    if use_kvmtool() && disk.image.is_none() && disk.partitions.len() == 1 {
+        let p = &disk.partitions[0];
+        let role = match disk.partitions.as_slice() {
+            [p] if p.label == "vm-instance" => DiskRole::VmInstance,
+            [p] if p.label == "encryptedstore" => DiskRole::EncryptedStore,
+            _ => DiskRole::Undefined,
+        };
+
+        let pfd = p
+            .image
+            .as_ref()
+            .ok_or_else(|| anyhow!("Partition should have image"))
+            .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?;
+        let image = clone_file(pfd)?;
+        return Ok(DiskFile { image, writable: disk.writable, role });
+    }
+
     let image = if !disk.partitions.is_empty() {
         if disk.image.is_some() {
             warn!("DiskImage {:?} contains both image and partitions.", disk);
@@ -978,11 +1018,31 @@ fn assemble_disk_image(
         .with_log()
         .or_service_specific_exception(-1)?;
 
-        // Pass the file descriptors for the various partition files to crosvm when it
-        // is run.
-        indirect_files.extend(partition_files);
+        info!("composite_image: {:?}", composite_image_filenames.composite);
 
-        image
+        if use_kvmtool() {
+            let raw_disk_path = get_raw_disk_path(temporary_directory, next_temporary_image_id);
+
+            let image = temp_unset_cloexec_on_files(&partition_files, || {
+                disk::export_image_to_raw(&composite_image_filenames.composite, &raw_disk_path)
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to export composite disk image {:?} to {:?}",
+                    composite_image_filenames.composite, raw_disk_path
+                )
+            })
+            .with_log()
+            .or_service_specific_exception(-1)?;
+
+            indirect_files.extend(partition_files);
+            image
+        } else {
+            // Pass the file descriptors for the various partition files to crosvm when it
+            // is run.
+            indirect_files.extend(partition_files);
+            image
+        }
     } else if let Some(image) = &disk.image {
         clone_file(image)?
     } else {
@@ -991,7 +1051,47 @@ fn assemble_disk_image(
             .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT);
     };
 
-    Ok(DiskFile { image, writable: disk.writable })
+    Ok(DiskFile { image, writable: disk.writable, role: DiskRole::Undefined })
+}
+
+/// Temporarily clear FD_CLOEXEC on these files so the crosvm `disk` layer can
+/// get duplicated FD of `/proc/self/fd/<n>` entries when flattening a composite image.
+/// In the crosvm, `validate_raw_fd()` rejects FDs with FD_CLOEXEC set, so we briefly clear it
+/// and restore the original flags afterwards.
+fn temp_unset_cloexec_on_files<F, T>(files: &[std::fs::File], f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    use libc::{fcntl, FD_CLOEXEC, F_GETFD, F_SETFD};
+    let mut saved_fd_flags = Vec::with_capacity(files.len());
+
+    for file in files {
+        let fd = file.as_raw_fd();
+        // SAFETY: `fd` comes from a live `File` and we only use `fcntl` to read/update its FD
+        // flags.
+        unsafe {
+            let flags = fcntl(fd, F_GETFD);
+            if flags >= 0 {
+                saved_fd_flags.push((fd, flags));
+                if (flags & FD_CLOEXEC) != 0 {
+                    // Disable a FD_CLOEXEC bit a while
+                    let _ = fcntl(fd, F_SETFD, flags & !FD_CLOEXEC);
+                }
+            }
+        }
+    }
+
+    let result = f();
+
+    for (fd, flags) in saved_fd_flags {
+        // SAFETY: `fd` and `flags` were captured from valid descriptors and `fcntl(F_SETFD)` only
+        // restores their flags.
+        unsafe {
+            let _ = fcntl(fd, F_SETFD, flags);
+        }
+    }
+
+    result
 }
 
 fn append_kernel_param(param: &str, vm_config: &mut VirtualMachineRawConfig) {
@@ -1127,6 +1227,7 @@ fn load_app_config(
     vm_config.cpuTopology = config.cpuTopology;
     vm_config.hugePages = config.hugePages || vm_payload_config.hugepages;
     vm_config.boostUclamp = config.boostUclamp;
+    vm_config.networkSupported = vm_config.networkSupported || vm_payload_config.network;
 
     // Microdroid takes additional init ramdisk & (optionally) storage image
     add_microdroid_system_images(config, instance_file, storage_image, os_name, &mut vm_config)?;
@@ -1218,6 +1319,12 @@ fn make_composite_image_filenames(
         header: temporary_directory.join(format!("composite-{}-header.img", id)),
         footer: temporary_directory.join(format!("composite-{}-footer.img", id)),
     }
+}
+
+#[allow(unused)]
+fn get_raw_disk_path(temporary_directory: &Path, target_comp_img_id: &mut u64) -> PathBuf {
+    let id = *target_comp_img_id;
+    temporary_directory.join(format!("raw_disk-{}.img", id))
 }
 
 /// Filenames for a composite disk image, including header and footer partitions.
@@ -1324,11 +1431,11 @@ fn check_label_for_file(file: &File, name: &str) -> Result<()> {
 /// Implementation of the AIDL `IVirtualMachine` interface. Used as a handle to a VM.
 #[derive(Debug)]
 struct VirtualMachine {
-    instance: Arc<VmInstance>,
+    instance: Arc<CommonVmInstance>,
 }
 
 impl VirtualMachine {
-    fn create(instance: Arc<VmInstance>) -> Strong<dyn IVirtualMachine> {
+    fn create(instance: Arc<CommonVmInstance>) -> Strong<dyn IVirtualMachine> {
         BnVirtualMachine::new_binder(VirtualMachine { instance }, BinderFeatures::default())
     }
 }
@@ -1509,18 +1616,18 @@ struct State {
     /// list while a strong reference is returned to the caller over Binder. Once all copies of
     /// the Binder client are dropped the weak reference here will become invalid, and will be
     /// removed from the list opportunistically the next time `add_vm` is called.
-    vms: Vec<Weak<VmInstance>>,
+    vms: Vec<Weak<CommonVmInstance>>,
 }
 
 impl State {
     /// Get a list of VMs which still have Binder references to them.
-    fn vms(&self) -> Vec<Arc<VmInstance>> {
+    fn vms(&self) -> Vec<Arc<CommonVmInstance>> {
         // Attempt to upgrade the weak pointers to strong pointers.
         self.vms.iter().filter_map(Weak::upgrade).collect()
     }
 
     /// Add a new VM to the list.
-    fn add_vm(&mut self, vm: Weak<VmInstance>) {
+    fn add_vm(&mut self, vm: Weak<CommonVmInstance>) {
         // Garbage collect any entries from the stored list which no longer exist.
         self.vms.retain(|vm| vm.strong_count() > 0);
 
@@ -1529,13 +1636,13 @@ impl State {
     }
 
     /// Get a VM that corresponds to the given cid
-    fn get_vm(&self, cid: Cid) -> Option<Arc<VmInstance>> {
+    fn get_vm(&self, cid: Cid) -> Option<Arc<CommonVmInstance>> {
         self.vms().into_iter().find(|vm| vm.cid == cid)
     }
 }
 
 /// Gets the `VirtualMachineState` of the given `VmInstance`.
-fn get_state(instance: &VmInstance) -> VirtualMachineState {
+fn get_state(instance: &CommonVmInstance) -> VirtualMachineState {
     match &*instance.vm_state.lock().unwrap() {
         VmState::NotStarted { .. } => VirtualMachineState::NOT_STARTED,
         VmState::Running { .. } => match instance.payload_state() {

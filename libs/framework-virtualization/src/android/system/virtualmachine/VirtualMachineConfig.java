@@ -460,7 +460,9 @@ public final class VirtualMachineConfig {
      *
      * @hide
      */
-    @TestApi
+    @SystemApi
+    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
+    @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
     @Nullable
     public String getPayloadConfigPath() {
         return mPayloadConfigPath;
@@ -583,6 +585,9 @@ public final class VirtualMachineConfig {
      * @see Builder#setConnectVmConsole
      * @hide
      */
+    @SystemApi
+    @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
+    @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
     public boolean isConnectVmConsole() {
         return mConnectVmConsole;
     }
@@ -1028,8 +1033,9 @@ public final class VirtualMachineConfig {
          *
          * @hide
          */
+        @SystemApi
+        @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
         @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
-        @TestApi
         @NonNull
         public Builder setPayloadConfigPath(@NonNull String payloadConfigPath) {
             mPayloadConfigPath =
@@ -1254,6 +1260,9 @@ public final class VirtualMachineConfig {
          *
          * @hide
          */
+        @SystemApi
+        @FlaggedApi(Flags.FLAG_AVF_V_TEST_APIS)
+        @RequiresPermission(VirtualMachine.USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
         @NonNull
         public Builder setConnectVmConsole(boolean supported) {
             mConnectVmConsole = supported;

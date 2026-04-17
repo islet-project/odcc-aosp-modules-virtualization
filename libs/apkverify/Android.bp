@@ -4,6 +4,7 @@ package {
 
 rust_defaults {
     name: "libapkverify.defaults",
+    host_supported: true,
     crate_name: "apkverify",
     defaults: ["avf_build_flags_rust"],
     srcs: ["src/lib.rs"],

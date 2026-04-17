@@ -51,7 +51,10 @@ pub fn get_apex_data_from_payload(metadata: &Metadata) -> Result<Vec<ApexData>> 
                 manifest_version: extracted.version,
                 public_key: extracted.public_key,
                 root_digest: extracted.root_digest,
-                last_update_seconds: apex.last_update_seconds,
+                // XXX Temporarily use a fixed value for last_update_seconds as it changes from boot-to-boot, even if the
+                // apexes are not updated. This inconsistency causes the verification process of the instance data to fail.
+                // last_update_seconds: apex.last_update_seconds,
+                last_update_seconds: 1,
                 is_factory: apex.is_factory,
             })
         })

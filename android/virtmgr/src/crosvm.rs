@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Copyright 2021, The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,28 +13,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Functions for running instances of `crosvm`.
+// Functions for running instances of `crosvm`.
 
 use crate::aidl::{remove_temporary_files, Cid, GLOBAL_SERVICE, VirtualMachineCallbacks};
 use crate::atom::{get_num_cpus, write_vm_exited_stats_sync};
-use crate::debug_config::DebugConfig;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use binder::ParcelFileDescriptor;
 use command_fds::CommandFdExt;
 use libc::{sysconf, _SC_CLK_TCK};
 use log::{debug, error, info};
-use semver::{Version, VersionReq};
+use semver::Version;
 use nix::{fcntl::OFlag, unistd::pipe2, unistd::Uid, unistd::User};
 use regex::{Captures, Regex};
 use rustutils::system_properties;
 use shared_child::SharedChild;
 use std::borrow::Cow;
-use std::cmp::max;
 use std::fmt;
 use std::fs::{read_to_string, File};
 use std::io::{self, Read};
 use std::mem;
-use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -42,19 +40,12 @@ use std::sync::{Arc, Condvar, Mutex, LazyLock};
 use std::time::{Duration, SystemTime};
 use std::thread::{self, JoinHandle};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
-    AudioConfig::AudioConfig as AudioConfigParcelable,
-    DisplayConfig::DisplayConfig as DisplayConfigParcelable,
-    GpuConfig::GpuConfig as GpuConfigParcelable,
-    UsbConfig::UsbConfig as UsbConfigParcelable,
-};
-use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
-use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IBoundDevice::IBoundDevice;
 use binder::Strong;
-use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
 use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
-use rpcbinder::RpcServer;
+pub use crate::common::*;
+use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::VirtualMachineAppConfig::DebugLevel::DebugLevel;
+use crate::common::add_preserved_fd;
 
 /// external/crosvm
 use vm_control::{BalloonControlCommand, VmRequest, VmResponse};
@@ -99,264 +90,9 @@ static BOOT_HANGUP_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
     }
 });
 
-/// Configuration for a VM to run with crosvm.
-#[derive(Debug)]
-pub struct CrosvmConfig {
-    pub cid: Cid,
-    pub name: String,
-    pub bootloader: Option<File>,
-    pub kernel: Option<File>,
-    pub initrd: Option<File>,
-    pub disks: Vec<DiskFile>,
-    pub params: Option<String>,
-    pub protected: bool,
-    pub debug_config: DebugConfig,
-    pub memory_mib: NonZeroU32,
-    pub cpus: Option<NonZeroU32>,
-    pub host_cpu_topology: bool,
-    pub console_out_fd: Option<File>,
-    pub console_in_fd: Option<File>,
-    pub log_fd: Option<File>,
-    pub ramdump: Option<File>,
-    pub indirect_files: Vec<File>,
-    pub platform_version: VersionReq,
-    pub detect_hangup: bool,
-    pub gdb_port: Option<NonZeroU16>,
-    pub vfio_devices: Vec<VfioDevice>,
-    pub dtbo: Option<File>,
-    pub device_tree_overlay: Option<File>,
-    pub display_config: Option<DisplayConfig>,
-    pub input_device_options: Vec<InputDeviceOption>,
-    pub hugepages: bool,
-    pub tap: Option<File>,
-    pub console_input_device: Option<String>,
-    pub boost_uclamp: bool,
-    pub gpu_config: Option<GpuConfig>,
-    pub audio_config: Option<AudioConfig>,
-    pub no_balloon: bool,
-    pub usb_config: UsbConfig,
-}
-
-#[derive(Debug)]
-pub struct AudioConfig {
-    pub use_microphone: bool,
-    pub use_speaker: bool,
-}
-
-impl AudioConfig {
-    pub fn new(raw_config: &AudioConfigParcelable) -> Self {
-        AudioConfig { use_microphone: raw_config.useMicrophone, use_speaker: raw_config.useSpeaker }
-    }
-}
-
-#[derive(Debug)]
-pub struct UsbConfig {
-    pub controller: bool,
-}
-
-impl UsbConfig {
-    pub fn new(raw_config: &UsbConfigParcelable) -> Result<UsbConfig> {
-        Ok(UsbConfig { controller: raw_config.controller })
-    }
-}
-
-#[derive(Debug)]
-pub struct DisplayConfig {
-    pub width: NonZeroU32,
-    pub height: NonZeroU32,
-    pub horizontal_dpi: NonZeroU32,
-    pub vertical_dpi: NonZeroU32,
-    pub refresh_rate: NonZeroU32,
-}
-
-impl DisplayConfig {
-    pub fn new(raw_config: &DisplayConfigParcelable) -> Result<DisplayConfig> {
-        let width = try_into_non_zero_u32(raw_config.width)?;
-        let height = try_into_non_zero_u32(raw_config.height)?;
-        let horizontal_dpi = try_into_non_zero_u32(raw_config.horizontalDpi)?;
-        let vertical_dpi = try_into_non_zero_u32(raw_config.verticalDpi)?;
-        let refresh_rate = try_into_non_zero_u32(raw_config.refreshRate)?;
-        Ok(DisplayConfig { width, height, horizontal_dpi, vertical_dpi, refresh_rate })
-    }
-}
-
-#[derive(Debug)]
-pub struct GpuConfig {
-    pub backend: Option<String>,
-    pub context_types: Option<Vec<String>>,
-    pub pci_address: Option<String>,
-    pub renderer_features: Option<String>,
-    pub renderer_use_egl: Option<bool>,
-    pub renderer_use_gles: Option<bool>,
-    pub renderer_use_glx: Option<bool>,
-    pub renderer_use_surfaceless: Option<bool>,
-    pub renderer_use_vulkan: Option<bool>,
-}
-
-impl GpuConfig {
-    pub fn new(raw_config: &GpuConfigParcelable) -> Result<GpuConfig> {
-        Ok(GpuConfig {
-            backend: raw_config.backend.clone(),
-            context_types: raw_config.contextTypes.clone().map(|context_types| {
-                context_types.iter().filter_map(|context_type| context_type.clone()).collect()
-            }),
-            pci_address: raw_config.pciAddress.clone(),
-            renderer_features: raw_config.rendererFeatures.clone(),
-            renderer_use_egl: Some(raw_config.rendererUseEgl),
-            renderer_use_gles: Some(raw_config.rendererUseGles),
-            renderer_use_glx: Some(raw_config.rendererUseGlx),
-            renderer_use_surfaceless: Some(raw_config.rendererUseSurfaceless),
-            renderer_use_vulkan: Some(raw_config.rendererUseVulkan),
-        })
-    }
-}
-
-fn try_into_non_zero_u32(value: i32) -> Result<NonZeroU32> {
-    let u32_value = value.try_into()?;
-    NonZeroU32::new(u32_value).ok_or(anyhow!("value should be greater than 0"))
-}
-
-/// A disk image to pass to crosvm for a VM.
-#[derive(Debug)]
-pub struct DiskFile {
-    pub image: File,
-    pub writable: bool,
-}
-
-/// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
-#[derive(Debug)]
-#[allow(dead_code)]
-pub enum InputDeviceOption {
-    EvDev(File),
-    SingleTouch { file: File, width: u32, height: u32, name: Option<String> },
-    Keyboard(File),
-    Mouse(File),
-    Switches(File),
-    MultiTouchTrackpad { file: File, width: u32, height: u32, name: Option<String> },
-    MultiTouch { file: File, width: u32, height: u32, name: Option<String> },
-}
-
-type VfioDevice = Strong<dyn IBoundDevice>;
-
-/// The lifecycle state which the payload in the VM has reported itself to be in.
-///
-/// Note that the order of enum variants is significant; only forward transitions are allowed by
-/// [`VmInstance::update_payload_state`].
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum PayloadState {
-    Starting,
-    Started,
-    Ready,
-    Finished,
-    Hangup, // Hasn't reached to Ready before timeout expires
-}
-
-/// The current state of the VM itself.
-#[derive(Debug)]
-pub enum VmState {
-    /// The VM has not yet tried to start.
-    NotStarted {
-        ///The configuration needed to start the VM, if it has not yet been started.
-        config: Box<CrosvmConfig>,
-    },
-    /// The VM has been started.
-    Running {
-        /// The crosvm child process.
-        child: Arc<SharedChild>,
-        /// The thread waiting for crosvm to finish.
-        monitor_vm_exit_thread: Option<JoinHandle<()>>,
-    },
-    /// The VM died or was killed.
-    Dead,
-    /// The VM failed to start.
-    Failed,
-}
-
-/// RSS values of VM and CrosVM process itself.
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Rss {
-    pub vm: i64,
-    pub crosvm: i64,
-}
-
-/// Metrics regarding the VM.
-#[derive(Debug, Default)]
-pub struct VmMetric {
-    /// Recorded timestamp when the VM is started.
-    pub start_timestamp: Option<SystemTime>,
-    /// Update most recent guest_time periodically from /proc/[crosvm pid]/stat while VM is
-    /// running.
-    pub cpu_guest_time: Option<i64>,
-    /// Update maximum RSS values periodically from /proc/[crosvm pid]/smaps while VM is running.
-    pub rss: Option<Rss>,
-}
-
-impl VmState {
-    /// Tries to start the VM, if it is in the `NotStarted` state.
-    ///
-    /// Returns an error if the VM is in the wrong state, or fails to start.
-    fn start(&mut self, instance: Arc<VmInstance>) -> Result<(), Error> {
-        let state = mem::replace(self, VmState::Failed);
-        if let VmState::NotStarted { config } = state {
-            let config = *config;
-            let detect_hangup = config.detect_hangup;
-            let (failure_pipe_read, failure_pipe_write) = create_pipe()?;
-            let vfio_devices = config.vfio_devices.clone();
-            let tap =
-                if let Some(tap_file) = &config.tap { Some(tap_file.try_clone()?) } else { None };
-
-            // If this fails and returns an error, `self` will be left in the `Failed` state.
-            let child =
-                Arc::new(run_vm(config, &instance.crosvm_control_socket_path, failure_pipe_write)?);
-
-            let instance_monitor_status = instance.clone();
-            let child_monitor_status = child.clone();
-            thread::spawn(move || {
-                instance_monitor_status.clone().monitor_vm_status(child_monitor_status);
-            });
-
-            let child_clone = child.clone();
-            let instance_clone = instance.clone();
-            let monitor_vm_exit_thread = Some(thread::spawn(move || {
-                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read, vfio_devices, tap);
-            }));
-
-            if detect_hangup {
-                let child_clone = child.clone();
-                thread::spawn(move || {
-                    instance.monitor_payload_hangup(child_clone);
-                });
-            }
-
-            // If it started correctly, update the state.
-            *self = VmState::Running { child, monitor_vm_exit_thread };
-            Ok(())
-        } else {
-            *self = state;
-            bail!("VM already started or failed")
-        }
-    }
-}
-
-/// Internal struct that holds the handles to globally unique resources of a VM.
-#[derive(Debug)]
-pub struct VmContext {
-    #[allow(dead_code)] // Keeps the global context alive
-    pub(crate) global_context: Strong<dyn IGlobalVmContext>,
-    #[allow(dead_code)] // Keeps the server alive
-    vm_server: RpcServer,
-}
-
-impl VmContext {
-    /// Construct new VmContext.
-    pub fn new(global_context: Strong<dyn IGlobalVmContext>, vm_server: RpcServer) -> VmContext {
-        VmContext { global_context, vm_server }
-    }
-}
-
 /// Information about a particular instance of a VM which may be running.
 #[derive(Debug)]
-pub struct VmInstance {
+pub struct CrosVmInstance {
     /// The current state of the VM.
     pub vm_state: Mutex<VmState>,
     /// Global resources allocated for this VM.
@@ -392,7 +128,7 @@ pub struct VmInstance {
     requester_uid_name: String,
 }
 
-impl fmt::Display for VmInstance {
+impl fmt::Display for CrosVmInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let adj = if self.protected { "Protected" } else { "Non-protected" };
         write!(
@@ -403,15 +139,15 @@ impl fmt::Display for VmInstance {
     }
 }
 
-impl VmInstance {
+impl CrosVmInstance {
     /// Validates the given config and creates a new `VmInstance` but doesn't start running it.
     pub fn new(
-        config: CrosvmConfig,
+        config: CommonVmConfig,
         temporary_directory: PathBuf,
         requester_uid: u32,
         requester_debug_pid: i32,
         vm_context: VmContext,
-    ) -> Result<VmInstance, Error> {
+    ) -> Result<CrosVmInstance, Error> {
         validate_config(&config)?;
         let cid = config.cid;
         let name = config.name.clone();
@@ -420,7 +156,7 @@ impl VmInstance {
             .ok()
             .flatten()
             .map_or_else(|| format!("{}", requester_uid), |u| u.name);
-        let instance = VmInstance {
+        let instance = CrosVmInstance {
             vm_state: Mutex::new(VmState::NotStarted { config: Box::new(config) }),
             vm_context,
             cid,
@@ -446,11 +182,49 @@ impl VmInstance {
     pub fn start(self: &Arc<Self>) -> Result<(), Error> {
         let mut vm_metric = self.vm_metric.lock().unwrap();
         vm_metric.start_timestamp = Some(SystemTime::now());
-        let ret = self.vm_state.lock().unwrap().start(self.clone());
-        if ret.is_ok() {
+
+        let mut vm_state = self.vm_state.lock().unwrap();
+        let previous_vm_state = mem::replace(&mut *vm_state, VmState::Failed);
+        if let VmState::NotStarted { config } = previous_vm_state {
+            let config = *config;
+            let detect_hangup = config.detect_hangup;
+            let (failure_pipe_read, failure_pipe_write) = create_pipe()?;
+            let vfio_devices = config.vfio_devices.clone();
+            let tap =
+                if let Some(tap_file) = &config.tap { Some(tap_file.try_clone()?) } else { None };
+
+            // If this fails and returns an error, `self` will be left in the `Failed` state.
+            let child =
+                Arc::new(run_vm(config, &self.crosvm_control_socket_path, failure_pipe_write)?);
+
+            let instance_monitor_status = self.clone();
+            let child_monitor_status = child.clone();
+            thread::spawn(move || {
+                instance_monitor_status.clone().monitor_vm_status(child_monitor_status);
+            });
+
+            let child_clone = child.clone();
+            let instance_clone = self.clone();
+            let monitor_vm_exit_thread = Some(thread::spawn(move || {
+                instance_clone.monitor_vm_exit(child_clone, failure_pipe_read, vfio_devices, tap);
+            }));
+
+            if detect_hangup {
+                let child_clone = child.clone();
+                let instance_clone = self.clone();
+                thread::spawn(move || {
+                    instance_clone.monitor_payload_hangup(child_clone);
+                });
+            }
+
+            // If it started correctly, update the state.
+            *vm_state = VmState::Running { child, monitor_vm_exit_thread };
             info!("{} started", &self);
+            Ok(())
+        } else {
+            *vm_state = previous_vm_state;
+            bail!("VM already started or failed")
         }
-        ret.with_context(|| format!("{} failed to start", &self))
     }
 
     /// Monitors the exit of the VM (i.e. termination of the `child` process). When that happens,
@@ -487,7 +261,7 @@ impl VmInstance {
         match failure_pipe_read.read_to_string(&mut failure_reason) {
             Err(e) => error!("Error reading VM failure reason from pipe: {}", e),
             Ok(len) if len > 0 => info!("VM returned failure reason '{}'", &failure_reason),
-            _ => (),
+           _ => (),
         };
 
         // In case of hangup, the pipe doesn't give us any information because the hangup can't be
@@ -726,12 +500,6 @@ impl VmInstance {
     }
 }
 
-impl Rss {
-    fn extract_max(x: &Rss, y: &Rss) -> Rss {
-        Rss { vm: max(x.vm, y.vm), crosvm: max(x.crosvm, y.crosvm) }
-    }
-}
-
 // Get Cpus_allowed mask
 fn check_if_all_cpus_allowed() -> Result<bool> {
     let file = read_to_string("/proc/self/status")?;
@@ -782,6 +550,7 @@ fn get_guest_time(pid: u32) -> Result<i64> {
 
 // Get rss from /proc/[crosvm pid]/smaps
 fn get_rss(pid: u32) -> Result<Rss> {
+
     let file = read_to_string(format!("/proc/{}/smaps", pid))?;
     let lines: Vec<_> = file.split('\n').collect();
 
@@ -885,7 +654,7 @@ fn vfio_argument_for_platform_device(device: &VfioDevice) -> Result<String, Erro
 
 /// Starts an instance of `crosvm` to manage a new VM.
 fn run_vm(
-    config: CrosvmConfig,
+    config: CommonVmConfig,
     crosvm_control_socket_path: &Path,
     failure_pipe_write: File,
 ) -> Result<SharedChild, Error> {
@@ -1202,7 +971,7 @@ fn run_vm(
 }
 
 /// Ensure that the configuration has a valid combination of fields set, or return an error if not.
-fn validate_config(config: &CrosvmConfig) -> Result<(), Error> {
+fn validate_config(config: &CommonVmConfig) -> Result<(), Error> {
     if config.bootloader.is_none() && config.kernel.is_none() {
         bail!("VM must have either a bootloader or a kernel image.");
     }
@@ -1247,15 +1016,6 @@ fn print_crosvm_args(command: &Command) {
     );
 }
 
-/// Adds the file descriptor for `file` to `preserved_fds`, and returns a string of the form
-/// "/proc/self/fd/N" where N is the file descriptor.
-fn add_preserved_fd<F: Into<OwnedFd>>(preserved_fds: &mut Vec<OwnedFd>, file: F) -> String {
-    let fd = file.into();
-    let raw_fd = fd.as_raw_fd();
-    preserved_fds.push(fd);
-    format!("/proc/self/fd/{}", raw_fd)
-}
-
 /// Adds the file descriptor for `file` (if any) to `preserved_fds`, and returns the appropriate
 /// string for a crosvm `--serial` flag. If `file` is none, creates a dummy sink device.
 fn format_serial_out_arg(preserved_fds: &mut Vec<OwnedFd>, file: Option<File>) -> String {
@@ -1289,4 +1049,159 @@ fn create_crosvm_control_listener(crosvm_control_socket_path: &Path) -> Result<O
     // because of a `nix` bug.
     socket::listen(&fd, socket::Backlog::new(127).unwrap()).context("listen failed")?;
     Ok(fd)
+}
+
+#[derive(Debug)]
+pub(crate) struct CrosVmBackend {
+    crosvm_control_socket_path: PathBuf
+}
+
+impl CrosVmBackend {
+    pub(crate) fn new(tempdir: &Path) -> Self {
+        CrosVmBackend {
+            crosvm_control_socket_path: tempdir.join("crosvm.sock")
+        }
+    }
+}
+
+impl VmInstanceBackend for CrosVmBackend {
+    fn run_vm(
+            &self,
+            config: CommonVmConfig,
+            failure_pipe_write: File,
+        ) -> Result<SharedChild, Error> {
+        run_vm(config, &self.crosvm_control_socket_path, failure_pipe_write)
+    }
+
+    fn check_cpu_stall(&self, status: &ExitStatus) {
+        if let Some(exit_status_code) = status.code() {
+            if exit_status_code == CROSVM_WATCHDOG_REBOOT_STATUS {
+                info!("detected vcpu stall on crosvm");
+            }
+        }
+    }
+
+    fn translate_death_reason(&self, result: &Result<ExitStatus, io::Error>, failure_reason: &str) -> DeathReason {
+        let mut failure_reason = failure_reason;
+        if let Some((reason, info)) = failure_reason.split_once('|') {
+            // Separator indicates extra context information is present after the failure name.
+            error!("Failure info: {info}");
+            failure_reason = reason;
+        }
+        if let Ok(status) = result {
+            match failure_reason {
+                "PVM_FIRMWARE_PUBLIC_KEY_MISMATCH" => {
+                    return DeathReason::PVM_FIRMWARE_PUBLIC_KEY_MISMATCH
+                }
+                "PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED" => {
+                    return DeathReason::PVM_FIRMWARE_INSTANCE_IMAGE_CHANGED
+                }
+                "MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE" => {
+                    return DeathReason::MICRODROID_FAILED_TO_CONNECT_TO_VIRTUALIZATION_SERVICE
+                }
+                "MICRODROID_PAYLOAD_HAS_CHANGED" => return DeathReason::MICRODROID_PAYLOAD_HAS_CHANGED,
+                "MICRODROID_PAYLOAD_VERIFICATION_FAILED" => {
+                    return DeathReason::MICRODROID_PAYLOAD_VERIFICATION_FAILED
+                }
+                "MICRODROID_INVALID_PAYLOAD_CONFIG" => {
+                    return DeathReason::MICRODROID_INVALID_PAYLOAD_CONFIG
+                }
+                "MICRODROID_UNKNOWN_RUNTIME_ERROR" => {
+                    return DeathReason::MICRODROID_UNKNOWN_RUNTIME_ERROR
+                }
+                "HANGUP" => return DeathReason::HANGUP,
+                _ => {}
+            }
+            match status.code() {
+                None => DeathReason::KILLED,
+                Some(0) => DeathReason::SHUTDOWN,
+                Some(CROSVM_START_ERROR_STATUS) => DeathReason::START_FAILED,
+                Some(CROSVM_REBOOT_STATUS) => DeathReason::REBOOT,
+                Some(CROSVM_CRASH_STATUS) => DeathReason::CRASH,
+                Some(CROSVM_WATCHDOG_REBOOT_STATUS) => DeathReason::WATCHDOG_REBOOT,
+                Some(_) => DeathReason::UNKNOWN,
+            }
+        } else {
+            DeathReason::INFRASTRUCTURE_ERROR
+        }
+    }
+
+    fn get_rss(&self, pid: u32) -> Result<Rss> {
+        let file = read_to_string(format!("/proc/{}/smaps", pid))?;
+        let lines: Vec<_> = file.split('\n').collect();
+
+        let mut rss_vm_total = 0i64;
+        let mut rss_crosvm_total = 0i64;
+        let mut is_vm = false;
+        for line in lines {
+            if line.contains("crosvm_guest") {
+                is_vm = true;
+            } else if line.contains("Rss:") {
+                let data_list: Vec<_> = line.split_whitespace().collect();
+                if data_list.len() < 2 {
+                    bail!("Failed to parse command result for getting rss :\n{}", line);
+                }
+                let rss = data_list[1].parse::<i64>()?;
+
+                if is_vm {
+                    rss_vm_total += rss;
+                    is_vm = false;
+                }
+                rss_crosvm_total += rss;
+            }
+        }
+
+        Ok(Rss { vm: rss_vm_total, crosvm: rss_crosvm_total })
+    }
+
+    fn resume(&self) -> Result<(), Error> {
+        match vm_control::client::handle_request(
+            &VmRequest::ResumeVcpus,
+            &self.crosvm_control_socket_path,
+        ) {
+            Ok(VmResponse::Ok) => Ok(()),
+            e => bail!("Failed to resume: {e:?}"),
+        }
+    }
+
+    fn suspend(&self) -> Result<(), Error> {
+        match vm_control::client::handle_request(
+            &VmRequest::SuspendVcpus,
+            &self.crosvm_control_socket_path,
+        ) {
+            Ok(VmResponse::Ok) => Ok(()),
+            e => bail!("Failed to suspend VM: {e:?}"),
+        }
+    }
+
+    fn get_memory_balloon(&self) -> Result<u64, Error> {
+        let request = VmRequest::BalloonCommand(BalloonControlCommand::Stats {});
+        let result =
+            match vm_control::client::handle_request(&request, &self.crosvm_control_socket_path) {
+                Ok(VmResponse::BalloonStats { stats: _, balloon_actual }) => balloon_actual,
+                Ok(VmResponse::Err(e)) => {
+                    // ENOTSUP is returned when the balloon protocol is not initialized. This
+                    // can occur for numerous reasons: Guest is still booting, guest doesn't
+                    // support ballooning, host doesn't support ballooning. We don't log or
+                    // raise an error in this case: trim is just a hint and we can ignore it.
+                    if e.errno() != libc::ENOTSUP {
+                        bail!("Errno return when requesting balloon stats: {}", e.errno())
+                    }
+                    0
+                }
+                e => bail!("Error requesting balloon stats: {:?}", e),
+            };
+        Ok(result)
+    }
+
+    fn set_memory_balloon(&self, num_bytes: u64) -> Result<(), Error> {
+        let command = BalloonControlCommand::Adjust { num_bytes, wait_for_success: false };
+        if let Err(e) = vm_control::client::handle_request(
+            &VmRequest::BalloonCommand(command),
+            &self.crosvm_control_socket_path,
+        ) {
+            bail!("Error sending balloon adjustment: {:?}", e);
+        }
+        Ok(())
+    }
 }

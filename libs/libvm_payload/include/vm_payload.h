@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2022 The Android Open Source Project
+ * Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// Samsung's changes: add support for Islet/Arm CCA
 
 #pragma once
 
@@ -50,6 +53,56 @@ typedef enum AVmAttestationStatus : int32_t {
     /** Remote attestation is not supported in the current environment. */
     ATTESTATION_ERROR_UNSUPPORTED = -10003,
 } AVmAttestationStatus;
+
+/**
+ * Measurement extend status returned by measurement extend operation.
+ */
+typedef enum AVmMeasurementExtendStatus : int32_t {
+    /** The measurement extend operation completes successfully. */
+    MEASUREMENT_EXTEND_OK = 0,
+
+     /** The measurement size is invalid. */
+    MEASUREMENT_EXTEND_ERROR_INVALID_MEASUREMENT = -10001,
+
+    /** Failed to extend the REM slot. */
+    MEASUREMENT_EXTEND_ERROR_FAILED_TO_EXTEND_ARM_CCA_REM_SLOT = -10002,
+
+    /** Measurement extend is not supported in the current environment. */
+    MEASUREMENT_EXTEND_ERROR_UNSUPPORTED = -10003,
+} AVmMeasurementExtendStatus;
+
+typedef enum AVmStartProvisioningStatus : int32_t {
+    /** The privisioning start operation completes successfully. */
+    PROVISIONING_START_OK = 0,
+
+    /** Invalid parameters has beend detected. */
+    PROVISIONING_ERROR_INVALID_PARAMS = -10001,
+
+    /** Remote provisioning operations is not supported in the current environment. */
+    PROVISIONING_ERROR_UNSUPPORTED = -10002,
+} AVmStartProvisioningStatus;
+
+/**
+ * Realm measurement slot indexes.
+ */
+typedef enum AVmMeasurementSlotIndex : size_t {
+        /** Realm Initial Measurement
+         *  \note This slot cannot be used in measurement extend operation.
+         */
+        RIM = 0u,
+
+        /** Realm Extensible Measurement Slot 0 */
+        REM0 = 1u,
+
+        /** Realm Extensible Measurement Slot 1 */
+        REM1 = 2u,
+
+        /** Realm Extensible Measurement Slot 2 */
+        REM2 = 3u,
+
+        /** Realm Extensible Measurement Slot 3 */
+        REM3 = 4u,
+ } AvmMeasurementSlotIndex;
 
 /**
  * Notifies the host that the payload is ready.
@@ -259,5 +312,71 @@ size_t AVmAttestationResult_getCertificateCount(const AVmAttestationResult* _Non
 size_t AVmAttestationResult_getCertificateAt(const AVmAttestationResult* _Nonnull result,
                                              size_t index, void* _Nullable data, size_t size)
         __INTRODUCED_IN(__ANDROID_API_V__);
+
+
+/**
+ * Requests the Arm CCA remote attestation token.
+ *
+ * The challenge will be included in the Realm attestation token,
+ * serving as proof of the freshness of the result.
+ *
+ * \param challenge A pointer to the challenge buffer.
+ * \param challenge_size size of the challenge. The supported challenge size is
+ *          64 bytes. The status ATTESTATION_ERROR_INVALID_CHALLENGE will be returned if
+ *          an invalid challenge is passed.
+ * \param evidence The Arm CCA attestation token will be filled here if the call
+ *               succeeds. The result remains valid until it is freed with
+ *              `free`.
+ * \param evidence_size The size of returned Arm CCA attestation token.
+ *
+ * \return ATTESTATION_OK upon successful attestation.
+ */
+AVmAttestationStatus AVmPayload_requestArmCcaAttestation(const void* _Nonnull challenge,
+                                                   size_t challenge_size,
+                                                   void* _Nullable* _Nonnull evidence,
+                                                   size_t* _Nonnull evidence_size)
+        __INTRODUCED_IN(__ANDROID_API_V__);
+
+
+/**
+ * Extends the Arm CCA REM slot.
+ *
+ * The measurement will be used to extend a specific Realm Extensible Measurement (REM) slot.
+ *
+ * \param index The index of REM slot
+ * \param measurement pointer to the measurement buffer.
+ * \param measurement_size size of the measurement buffer. The maximum supported measurement size is
+ *          64 bytes. The status MEASUREMENT_EXTEND_ERROR_INVALID_MEASUREMENT will be returned if
+ *          an invalid measurement is passed.
+ *
+ * \return MEASUREMENT_EXTEND_OK upon successful operation.
+ */
+AVmMeasurementExtendStatus AVmPayload_measurementExtend(enum AVmMeasurementSlotIndex index,
+                                                   const void* _Nonnull measurement,
+                                                   size_t measurement_size)
+        __INTRODUCED_IN(__ANDROID_API_V__);
+
+
+/**
+ * Starts a remote provisioning operation.
+ *
+ * A resource described by URL will be provisionied from the provisioning server to the destination
+ * path upon sucessful attestation of the platform and the Realm content.
+ *
+ * \param the url of the provisioned resource
+ * \param ca_cert_path the relative path to the Root CA Certificate used to authenticate the provisioning Server
+ *                   Note, that it is relative to <apk root path>/assets folder.
+ * \param destination the relative path of the downloaded file. The path is relative to encryptedstore mountpoint.
+ * \param callback The reference to the implementation of IProvisioningCallback.Stub used to notify the client
+ *                 about the status of the operation
+ *
+ * \return PROVISIONING_START_OK upon successful start of the operation.
+ */
+AVmStartProvisioningStatus AVmPayload_startProvisioning(const char* _Nonnull url,
+                                                   const char* _Nonnull ca_cert_path,
+                                                   const char* _Nonnull destination,
+                                                   AIBinder* _Nonnull callback)
+        __INTRODUCED_IN(__ANDROID_API_V__);
+
 
 __END_DECLS

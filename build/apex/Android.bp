@@ -91,6 +91,7 @@ apex_defaults {
     arch: {
         arm64: {
             binaries: [
+                "lkvm",
                 "crosvm",
                 "virtmgr",
                 "virtualizationservice",
@@ -108,10 +109,12 @@ apex_defaults {
             prebuilts: [
                 "rialto_bin",
                 "android_bootloader_crosvm_aarch64",
+                "microdroid_realm_metadata_file",
             ],
         },
         x86_64: {
             binaries: [
+                "lkvm",
                 "crosvm",
                 "virtmgr",
                 "virtualizationservice",
@@ -309,6 +312,15 @@ python_binary_host {
     },
 }
 
+cc_prebuilt_binary {
+    name: "lkvm",
+    srcs: ["kvmtool/lkvm"],
+    apex_available: ["com.android.virt"],
+    strip: {
+        none: true,
+    },
+}
+
 // Encapsulate the contributions made by the com.android.virt to the bootclasspath.
 bootclasspath_fragment {
     name: "com.android.virt-bootclasspath-fragment",
@@ -359,4 +371,90 @@ systemserverclasspath_fragment {
         true: true,
         default: false,
     }),
+}
+
+// Genrule to measure RIM (Realm Initial Measurement) for microdroid
+genrule {
+    name: "microdroid_rim_measurement",
+    srcs: [
+        ":microdroid_kernel",
+        ":microdroid_initrd_debuggable",
+    ],
+    out: ["rim_measurement.txt"],
+    tools: ["lkvm_rim_measurer_static"],
+    cmd: "mkdir -p $(genDir)/disks && " +
+        "dd if=/dev/zero of=$(genDir)/disks/disk1.img bs=1M count=10 2>/dev/null && " +
+        "dd if=/dev/zero of=$(genDir)/disks/disk2.img bs=1M count=10 2>/dev/null && " +
+        "dd if=/dev/zero of=$(genDir)/disks/disk3.img bs=1M count=10 2>/dev/null && " +
+        "dd if=/dev/zero of=$(genDir)/disks/disk4.img bs=1M count=10 2>/dev/null && " +
+        "mkdir -p $(genDir)/ipc-dir && " +
+        "$(location lkvm_rim_measurer_static) run " +
+        "--name ODCCService " +
+        "--vsock 2048 " +
+        "--balloon " +
+        "--params crashkernel=17M " +
+        "--mem 2048 " +
+        "--cpus 1 " +
+        "--term-file n=0,out=/dev/null,in=/dev/null " +
+        "--term-file n=1,out=/dev/null,in=/dev/null " +
+        "--term-file n=4,out=/dev/null,in=/dev/null " +
+        "--initrd $(location :microdroid_initrd_debuggable) " +
+        "--disk $(genDir)/disks/disk1.img " +
+        "--disk $(genDir)/disks/disk2.img,vm-instance " +
+        "--disk $(genDir)/disks/disk3.img,encryptedstore " +
+        "--disk $(genDir)/disks/disk4.img " +
+        "--kernel $(location :microdroid_kernel) " +
+        "--ipc-dir $(genDir)/ipc-dir " +
+        "--debug " +
+        "--realm " +
+        "--realm-pv-hex c85f3e4db5ebb451a6e384c77da00a4eff1dfc849bafb551ce40a4c548f4807ced8e7312e5129c143a731c2cb6ef2c57db9e5c98407bc061693c40ecd44f038b " +
+        "2>&1 | grep '^RIM:' | awk '{print $$2}' > $(out)",
+}
+
+// Filegroup for microdroid realm manifest template
+filegroup {
+    name: "microdroid_realm_manifest_template",
+    srcs: ["microdroid_realm_manifest.yaml"],
+}
+
+// Filegroup for microdroid realm private key
+filegroup {
+    name: "microdroid_realm_key",
+    srcs: ["com.microdroid.realm.pem"],
+}
+
+// Genrule to substitute {RIM} placeholder in manifest template with actual RIM value
+genrule {
+    name: "microdroid_realm_manifest",
+    srcs: [
+        ":microdroid_realm_manifest_template",
+        ":microdroid_rim_measurement",
+    ],
+    out: ["microdroid_realm_manifest.yaml"],
+    cmd: "RIM=$$(cat $(location :microdroid_rim_measurement)) && " +
+        "sed 's/{RIM}/'\"$$RIM\"'/g' $(location :microdroid_realm_manifest_template) > $(out)",
+}
+
+// Genrule to create microdroid realm metadata using realm_metadata_tool
+genrule {
+    name: "microdroid_realm_metadata",
+    srcs: [
+        ":microdroid_realm_manifest",
+        ":microdroid_realm_key",
+    ],
+    out: ["microdroid_realm_metadata.bin"],
+    tools: ["realm_metadata_tool"],
+    cmd: "$(location realm_metadata_tool) create " +
+        "-m $(location :microdroid_realm_manifest) " +
+        "-k $(location :microdroid_realm_key) " +
+        "-o $(out)",
+}
+
+// Prebuilt_etc to install microdroid realm metadata in the APEX
+prebuilt_etc {
+    name: "microdroid_realm_metadata_file",
+    src: ":microdroid_realm_metadata",
+    filename: "microdroid_realm_metadata.bin",
+    relative_install_path: "fs",
+    no_full_install: true,
 }

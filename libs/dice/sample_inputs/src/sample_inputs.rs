@@ -1,4 +1,5 @@
 // Copyright 2021, The Android Open Source Project
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// Samsung's changes: add support for Islet/Arm CCA
 
 //! This module provides a set of sample input values for a DICE chain, a sample UDS,
 //! as well as tuple of CDIs and BCC derived thereof.
@@ -26,6 +29,9 @@ use diced_open_dice::{
     DiceMode, InputValues, OwnedDiceArtifacts, Result, CDI_SIZE, HASH_SIZE, HIDDEN_SIZE,
 };
 use log::error;
+use std::fs::{File, remove_file};
+use std::io::{self, Read};
+use std::path::Path;
 
 /// Sample UDS used to perform the root dice flow by `make_sample_bcc_and_cdis`.
 const UDS: &[u8; CDI_SIZE] = &[
@@ -96,11 +102,34 @@ fn ed25519_public_key_to_cbor_value(public_key: &[u8]) -> Result<Value> {
     })
 }
 
+fn read_and_destroy_arm_cca_sealing_key(path: &Path) -> io::Result<[u8; CDI_SIZE]>
+{
+    let mut file = File::open(path)?;
+    let mut hex_string = String::new();
+
+    file.read_to_string(&mut hex_string)?;
+    let hex_string = hex_string.trim();
+
+    if hex_string.len() != CDI_SIZE * 2 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Hex string must be 64 characters long"));
+    }
+
+    let mut binary_data = [0u8; CDI_SIZE];
+    for (i, chunk) in hex_string.as_bytes().chunks(2).enumerate() {
+        let hex_byte = std::str::from_utf8(chunk).unwrap();
+        binary_data[i] = u8::from_str_radix(hex_byte, 16).unwrap();
+    }
+
+    remove_file(path)?;
+
+    Ok(binary_data)
+}
+
 /// Makes a DICE chain (BCC) from the sample input.
 ///
 /// The DICE chain is of the following format:
 /// public key derived from UDS -> ABL certificate -> AVB certificate -> Android certificate
-pub fn make_sample_bcc_and_cdis() -> Result<OwnedDiceArtifacts> {
+pub fn make_sample_bcc_and_cdis(sealing_cdi_path: Option<&Path>) -> Result<OwnedDiceArtifacts> {
     let private_key_seed = derive_cdi_private_key_seed(UDS).map_err(|e| {
         error!("In make_sample_bcc_and_cdis: Trying to derive private key seed. Error: {e}");
         e
@@ -184,9 +213,19 @@ pub fn make_sample_bcc_and_cdis() -> Result<OwnedDiceArtifacts> {
         DiceMode::kDiceModeNormal,
         [0u8; HIDDEN_SIZE], // hidden
     );
+
+    let cdi_seal = if let Some(path) = sealing_cdi_path {
+        read_and_destroy_arm_cca_sealing_key(path).map_err(|e| {
+        error!("In make_sample_bcc_and_cdis: Trying to run second bcc main flow. Error: {e}");
+            DiceError::InvalidInput
+        })?
+    } else {
+        *dice_artifacts.cdi_seal()
+    };
+
     retry_bcc_main_flow(
         dice_artifacts.cdi_attest(),
-        dice_artifacts.cdi_seal(),
+        &cdi_seal,
         dice_artifacts.bcc().ok_or_else(|| {
             error!("bcc is none");
             DiceError::InvalidInput

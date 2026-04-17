@@ -16,11 +16,14 @@
 
 mod aidl;
 mod atom;
+mod common;
 mod composite;
 mod crosvm;
 mod debug_config;
 mod dt_overlay;
+mod kvmtool;
 mod payload;
+mod properties;
 mod selinux;
 
 use crate::aidl::{GLOBAL_SERVICE, VirtualizationService};

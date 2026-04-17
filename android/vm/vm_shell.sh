@@ -40,9 +40,9 @@ function print_help() {
 function connect_vm() {
     cid=$1
     echo Connecting to CID ${cid}
-    adb disconnect localhost:8000 2>/dev/null
-    adb forward tcp:8000 vsock:${cid}:5555
-    adb connect localhost:8000
+    adb -s 0.0.0.0:6520 disconnect localhost:8000 2>/dev/null
+    adb -s 0.0.0.0:6520 forward tcp:8000 vsock:${cid}:5555
+    adb -s 0.0.0.0:6520 connect localhost:8000
     adb -s localhost:8000 root
     adb -s localhost:8000 wait-for-device
     adb -s localhost:8000 shell
@@ -51,7 +51,7 @@ function connect_vm() {
 
 function list_cids() {
     local selected_cid=$1
-    local available_cids=$(adb shell /apex/com.android.virt/bin/vm list | awk 'BEGIN { FS="[:,]" } /cid/ { print $2; }')
+    local available_cids=$(adb -s 0.0.0.0:6520 shell /apex/com.android.virt/bin/vm list | awk 'BEGIN { FS="[:,]" } /cid/ { print $2; }')
     echo "${available_cids}"
 }
 

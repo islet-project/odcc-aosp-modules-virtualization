@@ -19,6 +19,9 @@ interface IGlobalVmContext {
     /** Get the CID allocated to the VM. */
     int getCid();
 
+    /** Get the port allocated for the purposes of vsock proxy */
+    int getVsockProxyPort();
+
     /** Get the path to the temporary folder of the VM. */
     String getTemporaryDirectory();
 

@@ -45,7 +45,7 @@ use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use binder::Strong;
 use dice_driver::DiceDriver;
 use keystore2_crypto::ZVec;
-use libc::VMADDR_CID_HOST;
+use libc::{clock_settime, timespec, CLOCK_REALTIME, VMADDR_CID_HOST};
 use log::{error, info};
 use microdroid_metadata::{Metadata, PayloadMetadata};
 use microdroid_payload_config::{ApkConfig, OsConfig, Task, TaskType, VmPayloadConfig};
@@ -288,28 +288,37 @@ fn main() -> Result<()> {
     })
 }
 
-fn init_net() -> Result<()> {
-    if std::path::Path::new("/sys/class/net/eth0").exists() {
-        info!("Detected network interface trying to init it");
-        let mut cmd = Command::new("/system/bin/ip");
-        cmd.args(["link", "set", "eth0", "up"]);
-        cmd.status()?;
+fn set_system_time_from_host(service: &Strong<dyn IVirtualMachineService>) -> Result<()> {
+    let time_millis = service.getTimeMillis()
+        .map_err(|e| {
+            MicrodroidError::FailedToConnectToVirtualizationService(format!(
+                "Failed to get time in milliseconds: {e:?}"
+            ))
+        })?;
 
-        let mut cmd = Command::new("/system/bin/dhcp");
-        cmd.args(["-s", "/system/bin/microdroid_dhcp_script"]);
-        cmd.status()?;
+
+    let secs = time_millis / 1000;
+    let nsecs = (time_millis % 1000) * 1000000;
+    let ts = timespec {
+        tv_sec: secs as libc::time_t,
+        tv_nsec: nsecs as libc::c_long,
+    };
+
+    // SAFETY: The pointer `&ts` is valid for the duration of the call since it points to a
+    // stack-allocated local variable and the microdroid_manager runs with sufficient privileges
+    // to set the system time.
+    let res = unsafe {
+        clock_settime(CLOCK_REALTIME, &ts)
+    };
+
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Failed to set system time: {}",
+            std::io::Error::last_os_error()
+        ))
     }
-
-    Ok(())
-}
-
-fn synchronize_system_time_with_ntp() -> Result<()> {
-    let mut cmd = Command::new("/system/bin/sntp");
-    // The IP address of time.android.com (note, that currently Microdroid doesn't support address resolution via DNS)
-    cmd.args(["-s", "216.239.35.0"]);
-    cmd.status()?;
-
-    Ok(())
 }
 
 fn try_main() -> Result<()> {
@@ -551,15 +560,8 @@ fn try_run_payload(
     system_properties::write("microdroid_manager.init_done", "1")
         .context("set microdroid_manager.init_done")?;
 
-    init_net()?;
-
-    // Add a delay to make sure the network interface is ready
-    std::thread::sleep(Duration::from_secs(2));
-
-    info!("Network inited");
-
-    // Synchronize time/date using NTP client
-    synchronize_system_time_with_ntp()?;
+    // TODO Currently we're fetching the time from host. In the future we will nneed to implement Secure NTP client over vsock
+    set_system_time_from_host(service)?;
 
     info!("boot completed, time to run payload");
     exec_task(task, service).context("Failed to run payload")

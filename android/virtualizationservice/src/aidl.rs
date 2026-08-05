@@ -87,6 +87,9 @@ pub const TEMPORARY_DIRECTORY: &str = "/data/misc/virtualizationservice";
 const GUEST_CID_MIN: Cid = 2048;
 const GUEST_CID_MAX: Cid = 65535;
 
+// We allocate two CIDs per VM, one for VM paylaod communication and virtmgr service and one for vsock proxy port.
+const GUEST_CID_STRIDE: Cid = 2;
+
 const SYSPROP_LAST_CID: &str = "virtualizationservice.state.last_cid";
 
 const CHUNK_RECV_MAX_LEN: usize = 1024;
@@ -656,10 +659,20 @@ fn split_x509_certificate_chain(mut cert_chain: &[u8]) -> Result<Vec<Certificate
     Ok(out)
 }
 
+fn get_vsock_proxy_port(vm_cid: Cid) -> Cid {
+    let vsock_proxy_port = vm_cid.saturating_add(1);
+    // get_next_available_cid() should always result in even Cids that are in GUEST_CID_MIN..=GUEST_CID_MAX range
+    // therefore, the vsock_proxy_port should be always odd and also in the range
+    assert!(vsock_proxy_port <= GUEST_CID_MAX && vsock_proxy_port % GUEST_CID_STRIDE == 1);
+    vsock_proxy_port
+}
+
 #[derive(Debug, Default)]
 struct GlobalVmInstance {
     /// The unique CID assigned to the VM for vsock communication.
     cid: Cid,
+    /// The unique CID representing the port for vsock proxy
+    vsock_proxy_port: Cid,
     /// UID of the client who requested this VM instance.
     requester_uid: uid_t,
     /// PID of the client who requested this VM instance.
@@ -726,10 +739,10 @@ impl GlobalState {
             });
 
         let first_cid = if let Some(last_cid) = last_cid_prop {
-            if last_cid == GUEST_CID_MAX {
+            if last_cid == GUEST_CID_MAX - GUEST_CID_STRIDE + 1 {
                 GUEST_CID_MIN
             } else {
-                last_cid + 1
+                last_cid + GUEST_CID_STRIDE
             }
         } else {
             GUEST_CID_MIN
@@ -748,7 +761,7 @@ impl GlobalState {
     where
         I: Iterator<Item = Cid>,
     {
-        range.find(|cid| !self.held_contexts.contains_key(cid))
+        range.find(|cid| !self.held_contexts.contains_key(cid) && (*cid) % GUEST_CID_STRIDE == 0)
     }
 
     fn allocate_vm_context(
@@ -760,8 +773,15 @@ impl GlobalState {
         self.held_contexts.retain(|_, instance| instance.strong_count() > 0);
 
         let cid = self.get_next_available_cid()?;
+        // Because CIDs are managed solely by the GlobalState, we are sure that there is no other component
+        // that could interfere with allocation/deallocation of CIDs. Thus, for the purposes of provisioning
+        // we allocate additional CID (CID + 1) that is used as a vsock port i.e.:
+        // - the per VM VirtualMachineService instance listens on vosck port == VM's CID
+        // - the vsock proxy instance listens on vsock port == CID + 1
+        let vsock_proxy_port = get_vsock_proxy_port(cid);
         let instance = Arc::new(Mutex::new(GlobalVmInstance {
             cid,
+            vsock_proxy_port,
             requester_uid,
             requester_debug_pid,
             ..Default::default()
@@ -857,6 +877,10 @@ impl Interface for GlobalVmContext {}
 impl IGlobalVmContext for GlobalVmContext {
     fn getCid(&self) -> binder::Result<i32> {
         Ok(self.instance.lock().unwrap().cid as i32)
+    }
+
+    fn getVsockProxyPort(&self) -> binder::Result<i32> {
+        Ok(self.instance.lock().unwrap().vsock_proxy_port as i32)
     }
 
     fn getTemporaryDirectory(&self) -> binder::Result<String> {

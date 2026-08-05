@@ -1,0 +1,46 @@
+// Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+rust_defaults {
+    name: "vsock_proxy_defaults",
+    defaults: ["avf_build_flags_rust"],
+    edition: "2021",
+    prefer_rlib: true,
+    apex_available: [
+        "com.android.virt",
+    ],
+}
+
+rust_binary {
+    name: "vsock_proxy_cmd",
+    crate_name: "vsock_proxy_cmd",
+    defaults: ["vsock_proxy_defaults"],
+    srcs: ["src/main.rs"],
+    rustlibs: [
+        "libvsock",
+        "libvsock_proxy",
+        "liblog_rust",
+        "libenv_logger",
+        "libclap",
+    ],
+}
+
+rust_library {
+    name: "libvsock_proxy",
+    crate_name: "vsock_proxy",
+    defaults: ["vsock_proxy_defaults"],
+    host_supported: true,
+    srcs: [
+        "src/lib.rs",
+    ],
+    rustlibs: [
+        "libvsock",
+        "liblog_rust",
+        "libenv_logger",
+        "libthiserror",
+        "libclap",
+        "libserde",
+        "libserde_json",
+        "libnix",
+    ],
+}

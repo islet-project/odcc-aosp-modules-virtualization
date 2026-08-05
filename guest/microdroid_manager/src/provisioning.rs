@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Context, Result};
+use libc::VMADDR_CID_HOST;
 use nix::fcntl::{openat, OFlag};
 use nix::sys::stat::{fchmod, Mode};
 use nix::unistd::{fchown, Gid};
@@ -14,7 +15,15 @@ use url::Url;
 use android_system_virtualization_payload::aidl::android::system::virtualization::payload::IVmPayloadService::VM_APK_CONTENTS_PATH;
 
 pub fn run_provisioning_command(url: &str, ca_cert: &Path, destination: &Path) -> Result<Child> {
-    // TODO replace it with a provisioning client command
+
+    // The provisioning proxy listens on port == (CID of VM) + 1
+    let local_cid = vsock::get_local_cid().context("Could not determine local CID")?;
+    // The CID allocated per VM should be always even
+    if local_cid % 2 != 0 {
+        return Err(anyhow::anyhow!("local_cid ({}) is odd, expected even CID allocated per VM", local_cid));
+    }
+    let provisioning_proxy_port = local_cid.saturating_add(1);
+
     let mut cmd = Command::new("/system/bin/ratls_get");
     cmd
         .arg("-u")
@@ -22,7 +31,12 @@ pub fn run_provisioning_command(url: &str, ca_cert: &Path, destination: &Path) -
         .arg("-r")
         .arg(ca_cert)
         .arg("-o")
-        .arg(destination);
+        .arg(destination)
+        .arg("--vsock-cid")
+        .arg(VMADDR_CID_HOST.to_string())
+        .arg("--vsock-port")
+        .arg(provisioning_proxy_port.to_string())
+        .arg("--conproto");
     cmd.spawn().context("provisioning failed")
 }
 

@@ -92,16 +92,26 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak, LazyLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use vbmeta::VbMetaImage;
 use vmconfig::{VmConfig, get_debug_level};
 use vsock::VsockStream;
 use zip::ZipArchive;
 use crate::common::DiskRole;
+use vsock_proxy::conhandler::{
+    ConnectionHandler, ConnectionHandlerConfig, VsockCid
+};
+
+use vsock_proxy::policy::PolicyManager;
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
 pub type Cid = u32;
+pub type VsockProxyPort = u32;
+pub const PROHIBITED_VSOCK_PROXY_PORT: VsockProxyPort = 0;
 
 pub const BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtualizationservice";
+
+const VSOCK_PROXY_WHITELIST_FILE: &str = "assets/whitelist.json";
 
 /// The size of zero.img.
 /// Gaps in composite disk images are filled with a shared zero.img.
@@ -386,6 +396,11 @@ impl IGlobalVmContext for EarlyVmContext {
         Ok(self.cid as i32)
     }
 
+    fn getVsockProxyPort(&self) -> binder::Result<i32> {
+        // Early VMs don't support vsock proxy
+        unimplemented!()
+    }
+
     fn getTemporaryDirectory(&self) -> binder::Result<String> {
         Ok(self.temp_dir.to_string_lossy().to_string())
     }
@@ -416,7 +431,7 @@ impl VirtualizationService {
     fn create_early_vm_context(
         &self,
         config: &VirtualMachineConfig,
-    ) -> binder::Result<(VmContext, Cid, PathBuf)> {
+    ) -> binder::Result<(VmContext, Cid, PathBuf, VsockProxyPort)> {
         let calling_exe_path = format!("/proc/{}/exe", get_calling_pid());
         let link = fs::read_link(&calling_exe_path)
             .context(format!("can't read_link '{calling_exe_path}'"))
@@ -452,18 +467,19 @@ impl VirtualizationService {
             .context(format!("Could not start RpcServer on port {port}"))
             .or_service_specific_exception(-1)?;
         vm_server.start();
-        Ok((VmContext::new(Strong::new(Box::new(context)), vm_server), cid, temp_dir))
+        Ok((VmContext::new(Strong::new(Box::new(context)), vm_server), cid, temp_dir, PROHIBITED_VSOCK_PROXY_PORT))
     }
 
     fn create_vm_context(
         &self,
         requester_debug_pid: pid_t,
-    ) -> binder::Result<(VmContext, Cid, PathBuf)> {
+    ) -> binder::Result<(VmContext, Cid, PathBuf, VsockProxyPort)> {
         const NUM_ATTEMPTS: usize = 5;
 
         for _ in 0..NUM_ATTEMPTS {
             let vm_context = GLOBAL_SERVICE.allocateGlobalVmContext(requester_debug_pid)?;
             let cid = vm_context.getCid()? as Cid;
+            let vsock_proxy_port = vm_context.getVsockProxyPort()? as VsockProxyPort;
             let temp_dir: PathBuf = vm_context.getTemporaryDirectory()?.into();
             let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
 
@@ -472,7 +488,7 @@ impl VirtualizationService {
             match RpcServer::new_vsock(service, cid, port) {
                 Ok(vm_server) => {
                     vm_server.start();
-                    return Ok((VmContext::new(vm_context, vm_server), cid, temp_dir));
+                    return Ok((VmContext::new(vm_context, vm_server), cid, temp_dir, vsock_proxy_port));
                 }
                 Err(err) => {
                     warn!("Could not start RpcServer on port {}: {}", port, err);
@@ -503,7 +519,7 @@ impl VirtualizationService {
         }
 
         // Allocating VM context checks the MANAGE_VIRTUAL_MACHINE permission.
-        let (vm_context, cid, temporary_directory) = if cfg!(early) {
+        let (vm_context, cid, temporary_directory, vsock_proxy_port) = if cfg!(early) {
             self.create_early_vm_context(config)?
         } else {
             self.create_vm_context(requester_debug_pid)?
@@ -512,6 +528,45 @@ impl VirtualizationService {
         if is_custom_config(config) {
             check_use_custom_virtual_machine()?;
         }
+
+        // Setup vsock proxy
+        let vsock_proxy_connection_handler = if vsock_proxy_port != PROHIBITED_VSOCK_PROXY_PORT {
+            let policy_manager = match config {
+                VirtualMachineConfig::AppConfig(config) => {
+                    let apk_file = clone_file(config.apk.as_ref().unwrap())?;
+                    match initialize_vsock_proxy_policymanager_from_file(&apk_file, VSOCK_PROXY_WHITELIST_FILE) {
+                        Ok(policy_manager) => {
+                            info!("PolicyManager for vsock proxy has been initialized");
+                            policy_manager.log_policy();
+                            Some(policy_manager)
+                        },
+                        Err(_) => None,
+                    }
+                },
+                VirtualMachineConfig::RawConfig(_) => None,
+            };
+
+            let vsock_proxy_config = ConnectionHandlerConfig {
+                vsock_cid: VsockCid::Host,
+                vsock_port: vsock_proxy_port,
+                server_addr: None,
+                conproto: true,
+                timeout_secs: 30,
+                policy_manager,
+                vm_cid: cid,
+            };
+
+            let mut vsock_proxy_connection_handler = ConnectionHandler::new(vsock_proxy_config);
+            vsock_proxy_connection_handler.run()
+                .context("Failed to create Vsock Proxy connection handler")
+                .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?;
+
+            info!("Vsock proxy is listening at {} vsock port", vsock_proxy_port);
+            Some(vsock_proxy_connection_handler)
+        } else {
+            error!("Vsock proxy is not active");
+            None
+        };
 
         let gdb_port = extract_gdb_port(config);
 
@@ -771,6 +826,7 @@ impl VirtualizationService {
                 requester_uid,
                 requester_debug_pid,
                 vm_context,
+                vsock_proxy_connection_handler,
             )
             .with_context(|| format!("Failed to create VM with config {:?}", config))
             .with_log()
@@ -1284,6 +1340,17 @@ fn load_vm_payload_config_from_file(apk_file: &File, config_path: &str) -> Resul
     let config_file = apk_zip.by_name(config_path)?;
     Ok(serde_json::from_reader(config_file)?)
 }
+
+fn initialize_vsock_proxy_policymanager_from_file(apk_file: &File, whitelist_path: &str) -> Result<Arc<PolicyManager>> {
+    let mut apk_zip = ZipArchive::new(apk_file)?;
+    let whitelist_file = apk_zip.by_name(whitelist_path)?;
+
+    let policy_manager = Arc::new(PolicyManager::new());
+    policy_manager.load_from_reader(whitelist_file)?;
+
+    Ok(policy_manager)
+}
+
 
 fn create_vm_payload_config(
     payload_config: &VirtualMachinePayloadConfig,
@@ -1954,6 +2021,18 @@ impl IVirtualMachineService for VirtualMachineService {
 
     fn requestAttestation(&self, csr: &[u8], test_mode: bool) -> binder::Result<Vec<Certificate>> {
         GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32, test_mode)
+    }
+
+    // This is temporary solution. Microdroid manager fetches the date/time from the Android
+    // host to set the system date/time inside the VM for the purposes of certificate
+    // validity period verification.
+    fn getTimeMillis(&self) -> binder::Result<i64> {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("Failed to get current time")
+            .or_service_specific_exception(-1);
+        let duration = duration.unwrap();
+        Ok(duration.as_millis() as i64)
     }
 }
 

@@ -22,8 +22,8 @@ use std::net::{SocketAddr, UdpSocket, IpAddr, ToSocketAddrs};
 use std::sync::{Arc, RwLock, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use std::thread::JoinHandle;
-use vsock::{VsockListener, VsockStream, VMADDR_CID_HOST};
-//use std::os::fd::AsFd;
+use vsock::{VsockListener, VsockStream};
+use crate::conhandler::VsockCid;
 
 /// Default buffer size for datagram packets (64 KB)
 pub const DATAGRAM_BUFFER_SIZE: usize = 65536;
@@ -312,7 +312,7 @@ impl DatagramHeader {
 #[derive(Debug, Clone)]
 pub struct DatagramHandlerConfig {
     /// The CID of the vsock listening socket
-    pub vsock_cid: u32,
+    pub vsock_cid: VsockCid,
     /// The port of the vsock listening socket
     pub vsock_port: u32,
     /// Connection timeout in seconds
@@ -324,7 +324,7 @@ pub struct DatagramHandlerConfig {
 impl Default for DatagramHandlerConfig {
     fn default() -> Self {
         DatagramHandlerConfig {
-            vsock_cid: VMADDR_CID_HOST,
+            vsock_cid: VsockCid::Host,
             vsock_port: 1338, // Default datagram port (different from stream port 1337)
             timeout_secs: 60,
             cache_timeout_secs: 300,
@@ -402,7 +402,7 @@ impl DatagramHandler {
 
         // Create vsock listener socket (SOCK_STREAM)
         let vsock_listener = VsockListener::bind_with_cid_port(
-            self.config.vsock_cid,
+            self.config.vsock_cid as u32,
             self.config.vsock_port,
         )
         .map_err(|e| {

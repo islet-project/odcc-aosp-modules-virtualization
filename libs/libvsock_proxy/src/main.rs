@@ -145,7 +145,7 @@ fn run_datagram_mode(args: &Args) -> io::Result<()>
     info!("Running in datagram mode (vsock datagram -> UDP)");
 
     let config = DatagramHandlerConfig {
-        vsock_cid: u32::from(args.vsock_cid),
+        vsock_cid: args.vsock_cid,
         vsock_port: args.vsock_port,
         timeout_secs: args.timeout_secs,
         cache_timeout_secs: args.cache_timeout_secs,

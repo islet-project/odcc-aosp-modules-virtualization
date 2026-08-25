@@ -87,8 +87,11 @@ pub const TEMPORARY_DIRECTORY: &str = "/data/misc/virtualizationservice";
 const GUEST_CID_MIN: Cid = 2048;
 const GUEST_CID_MAX: Cid = 65535;
 
-// We allocate two CIDs per VM, one for VM paylaod communication and virtmgr service and one for vsock proxy port.
-const GUEST_CID_STRIDE: Cid = 2;
+// We allocate three CIDs per VM
+// one for VM paylaod communication and virtmgr service
+// one for stream vsock proxy port, and
+// one for datagram vsock proxy port
+const GUEST_CID_STRIDE: Cid = 3;
 
 const SYSPROP_LAST_CID: &str = "virtualizationservice.state.last_cid";
 
@@ -659,20 +662,30 @@ fn split_x509_certificate_chain(mut cert_chain: &[u8]) -> Result<Vec<Certificate
     Ok(out)
 }
 
-fn get_vsock_proxy_port(vm_cid: Cid) -> Cid {
-    let vsock_proxy_port = vm_cid.saturating_add(1);
+fn get_stream_vsock_proxy_port(vm_cid: Cid) -> Cid {
+    let stream_vsock_proxy_port = vm_cid.saturating_add(1);
     // get_next_available_cid() should always result in even Cids that are in GUEST_CID_MIN..=GUEST_CID_MAX range
-    // therefore, the vsock_proxy_port should be always odd and also in the range
-    assert!(vsock_proxy_port <= GUEST_CID_MAX && vsock_proxy_port % GUEST_CID_STRIDE == 1);
-    vsock_proxy_port
+    // therefore, the stream_vsock_proxy_port should be always odd and also in the range
+    assert!(stream_vsock_proxy_port <= GUEST_CID_MAX && stream_vsock_proxy_port % GUEST_CID_STRIDE == 1);
+    stream_vsock_proxy_port
 }
+
+fn get_datagram_vsock_proxy_port(vm_cid: Cid) -> Cid {
+    let stream_vsock_proxy_port = vm_cid.saturating_add(2);
+    // get_next_available_cid() should always result in even Cids that are in GUEST_CID_MIN..=GUEST_CID_MAX range
+    assert!(stream_vsock_proxy_port <= GUEST_CID_MAX && stream_vsock_proxy_port % GUEST_CID_STRIDE == 2);
+    stream_vsock_proxy_port
+}
+
 
 #[derive(Debug, Default)]
 struct GlobalVmInstance {
     /// The unique CID assigned to the VM for vsock communication.
     cid: Cid,
-    /// The unique CID representing the port for vsock proxy
-    vsock_proxy_port: Cid,
+    /// The unique CID representing the port for stream vsock proxy
+    stream_vsock_proxy_port: Cid,
+    /// The unique CID representing the port for datagram vsock proxy
+    datagram_vsock_proxy_port: Cid,
     /// UID of the client who requested this VM instance.
     requester_uid: uid_t,
     /// PID of the client who requested this VM instance.
@@ -777,11 +790,14 @@ impl GlobalState {
         // that could interfere with allocation/deallocation of CIDs. Thus, for the purposes of provisioning
         // we allocate additional CID (CID + 1) that is used as a vsock port i.e.:
         // - the per VM VirtualMachineService instance listens on vosck port == VM's CID
-        // - the vsock proxy instance listens on vsock port == CID + 1
-        let vsock_proxy_port = get_vsock_proxy_port(cid);
+        // - the stream vsock proxy instance listens on vsock port == CID + 1
+        // - the datagram vsock proxy instance listens on vsock port == CID + 2
+        let stream_vsock_proxy_port = get_stream_vsock_proxy_port(cid);
+        let datagram_vsock_proxy_port = get_datagram_vsock_proxy_port(cid);
         let instance = Arc::new(Mutex::new(GlobalVmInstance {
             cid,
-            vsock_proxy_port,
+            stream_vsock_proxy_port,
+            datagram_vsock_proxy_port,
             requester_uid,
             requester_debug_pid,
             ..Default::default()
@@ -879,8 +895,12 @@ impl IGlobalVmContext for GlobalVmContext {
         Ok(self.instance.lock().unwrap().cid as i32)
     }
 
-    fn getVsockProxyPort(&self) -> binder::Result<i32> {
-        Ok(self.instance.lock().unwrap().vsock_proxy_port as i32)
+    fn getStreamVsockProxyPort(&self) -> binder::Result<i32> {
+        Ok(self.instance.lock().unwrap().stream_vsock_proxy_port as i32)
+    }
+
+    fn getDatagramVsockProxyPort(&self) -> binder::Result<i32> {
+        Ok(self.instance.lock().unwrap().datagram_vsock_proxy_port as i32)
     }
 
     fn getTemporaryDirectory(&self) -> binder::Result<String> {

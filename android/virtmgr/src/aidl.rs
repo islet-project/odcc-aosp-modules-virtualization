@@ -102,6 +102,11 @@ use vsock_proxy::conhandler::{
     ConnectionHandler, ConnectionHandlerConfig, VsockCid
 };
 
+use vsock_proxy::datagram_handler::{
+    DatagramHandler, DatagramHandlerConfig
+};
+
+
 use vsock_proxy::policy::PolicyManager;
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
@@ -396,8 +401,13 @@ impl IGlobalVmContext for EarlyVmContext {
         Ok(self.cid as i32)
     }
 
-    fn getVsockProxyPort(&self) -> binder::Result<i32> {
-        // Early VMs don't support vsock proxy
+    fn getStreamVsockProxyPort(&self) -> binder::Result<i32> {
+        // Early VMs don't support stream vsock proxy
+        unimplemented!()
+    }
+
+    fn getDatagramVsockProxyPort(&self) -> binder::Result<i32> {
+        // Early VMs don't support datagram vsock proxy
         unimplemented!()
     }
 
@@ -431,7 +441,7 @@ impl VirtualizationService {
     fn create_early_vm_context(
         &self,
         config: &VirtualMachineConfig,
-    ) -> binder::Result<(VmContext, Cid, PathBuf, VsockProxyPort)> {
+    ) -> binder::Result<(VmContext, Cid, PathBuf, VsockProxyPort, VsockProxyPort)> {
         let calling_exe_path = format!("/proc/{}/exe", get_calling_pid());
         let link = fs::read_link(&calling_exe_path)
             .context(format!("can't read_link '{calling_exe_path}'"))
@@ -467,19 +477,21 @@ impl VirtualizationService {
             .context(format!("Could not start RpcServer on port {port}"))
             .or_service_specific_exception(-1)?;
         vm_server.start();
-        Ok((VmContext::new(Strong::new(Box::new(context)), vm_server), cid, temp_dir, PROHIBITED_VSOCK_PROXY_PORT))
+        Ok((VmContext::new(Strong::new(Box::new(context)), vm_server), cid, temp_dir,
+            PROHIBITED_VSOCK_PROXY_PORT, PROHIBITED_VSOCK_PROXY_PORT))
     }
 
     fn create_vm_context(
         &self,
         requester_debug_pid: pid_t,
-    ) -> binder::Result<(VmContext, Cid, PathBuf, VsockProxyPort)> {
+    ) -> binder::Result<(VmContext, Cid, PathBuf, VsockProxyPort, VsockProxyPort)> {
         const NUM_ATTEMPTS: usize = 5;
 
         for _ in 0..NUM_ATTEMPTS {
             let vm_context = GLOBAL_SERVICE.allocateGlobalVmContext(requester_debug_pid)?;
             let cid = vm_context.getCid()? as Cid;
-            let vsock_proxy_port = vm_context.getVsockProxyPort()? as VsockProxyPort;
+            let stream_vsock_proxy_port = vm_context.getStreamVsockProxyPort()? as VsockProxyPort;
+            let datagram_vsock_proxy_port = vm_context.getDatagramVsockProxyPort()? as VsockProxyPort;
             let temp_dir: PathBuf = vm_context.getTemporaryDirectory()?.into();
             let service = VirtualMachineService::new_binder(self.state.clone(), cid).as_binder();
 
@@ -488,7 +500,8 @@ impl VirtualizationService {
             match RpcServer::new_vsock(service, cid, port) {
                 Ok(vm_server) => {
                     vm_server.start();
-                    return Ok((VmContext::new(vm_context, vm_server), cid, temp_dir, vsock_proxy_port));
+                    return Ok((VmContext::new(vm_context, vm_server),
+                        cid, temp_dir, stream_vsock_proxy_port, datagram_vsock_proxy_port));
                 }
                 Err(err) => {
                     warn!("Could not start RpcServer on port {}: {}", port, err);
@@ -519,7 +532,7 @@ impl VirtualizationService {
         }
 
         // Allocating VM context checks the MANAGE_VIRTUAL_MACHINE permission.
-        let (vm_context, cid, temporary_directory, vsock_proxy_port) = if cfg!(early) {
+        let (vm_context, cid, temporary_directory, stream_vsock_proxy_port, datagram_vsock_proxy_port) = if cfg!(early) {
             self.create_early_vm_context(config)?
         } else {
             self.create_vm_context(requester_debug_pid)?
@@ -529,8 +542,8 @@ impl VirtualizationService {
             check_use_custom_virtual_machine()?;
         }
 
-        // Setup vsock proxy
-        let vsock_proxy_connection_handler = if vsock_proxy_port != PROHIBITED_VSOCK_PROXY_PORT {
+        // Setup stream vsock proxy
+        let stream_vsock_proxy_connection_handler = if stream_vsock_proxy_port != PROHIBITED_VSOCK_PROXY_PORT {
             let policy_manager = match config {
                 VirtualMachineConfig::AppConfig(config) => {
                     let apk_file = clone_file(config.apk.as_ref().unwrap())?;
@@ -546,9 +559,9 @@ impl VirtualizationService {
                 VirtualMachineConfig::RawConfig(_) => None,
             };
 
-            let vsock_proxy_config = ConnectionHandlerConfig {
+            let stream_vsock_proxy_config = ConnectionHandlerConfig {
                 vsock_cid: VsockCid::Host,
-                vsock_port: vsock_proxy_port,
+                vsock_port: stream_vsock_proxy_port,
                 server_addr: None,
                 conproto: true,
                 timeout_secs: 30,
@@ -556,15 +569,36 @@ impl VirtualizationService {
                 vm_cid: cid,
             };
 
-            let mut vsock_proxy_connection_handler = ConnectionHandler::new(vsock_proxy_config);
-            vsock_proxy_connection_handler.run()
-                .context("Failed to create Vsock Proxy connection handler")
+            let mut stream_vsock_proxy_connection_handler = ConnectionHandler::new(stream_vsock_proxy_config);
+            stream_vsock_proxy_connection_handler.run()
+                .context("Failed to create stream vsock proxy connection handler")
                 .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?;
 
-            info!("Vsock proxy is listening at {} vsock port", vsock_proxy_port);
-            Some(vsock_proxy_connection_handler)
+            info!("Stream vsock proxy is listening at {} port", stream_vsock_proxy_port);
+            Some(stream_vsock_proxy_connection_handler)
         } else {
-            error!("Vsock proxy is not active");
+            error!("Stream vsock proxy is not active");
+            None
+        };
+
+        // Setup datagram vsock proxy
+        let datagram_vsock_proxy_connection_handler = if datagram_vsock_proxy_port != PROHIBITED_VSOCK_PROXY_PORT {
+            let datagram_vsock_proxy_config = DatagramHandlerConfig {
+                vsock_cid: VsockCid::Host,
+                vsock_port: datagram_vsock_proxy_port,
+                timeout_secs: 30,
+                cache_timeout_secs: 60,
+            };
+
+            let mut datagram_vsock_proxy_connection_handler = DatagramHandler::new(datagram_vsock_proxy_config);
+            datagram_vsock_proxy_connection_handler.run()
+                .context("Failed to create datagram vsock proxy connection handler")
+                .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?;
+
+            info!("Datagram vsock proxy is listening at {} port", stream_vsock_proxy_port);
+            Some(datagram_vsock_proxy_connection_handler)
+        } else {
+            error!("Datagram vsock proxy is not active");
             None
         };
 
@@ -826,7 +860,8 @@ impl VirtualizationService {
                 requester_uid,
                 requester_debug_pid,
                 vm_context,
-                vsock_proxy_connection_handler,
+                stream_vsock_proxy_connection_handler,
+                datagram_vsock_proxy_connection_handler,
             )
             .with_context(|| format!("Failed to create VM with config {:?}", config))
             .with_log()

@@ -59,6 +59,7 @@ use std::mem;
 use std::os::fd::AsRawFd;
 use crate::properties::use_kvmtool;
 use vsock_proxy::conhandler::ConnectionHandler;
+use vsock_proxy::datagram_handler::DatagramHandler;
 
 const MILLIS_PER_SEC: i64 = 1000;
 
@@ -337,8 +338,10 @@ pub struct CommonVmInstance {
     requester_uid_name: String,
     /// Vm backend
     backend: Box<dyn VmInstanceBackend + Send + Sync>,
-    /// Connection handler for vsock proxy
-    vsock_proxy_connection_handler: Option<Arc<Mutex<ConnectionHandler>>>,
+    /// Connection handler for stream vsock proxy
+    stream_vsock_proxy_connection_handler: Option<Arc<Mutex<ConnectionHandler>>>,
+    /// Connection handler for datagram vsock proxy
+    datagram_vsock_proxy_connection_handler: Option<Arc<Mutex<DatagramHandler>>>,
 }
 
 impl fmt::Display for CommonVmInstance {
@@ -378,9 +381,11 @@ impl CommonVmInstance {
         requester_uid: u32,
         requester_debug_pid: i32,
         vm_context: VmContext,
-        vsock_proxy_connection_handler: Option<ConnectionHandler>,
+        stream_vsock_proxy_connection_handler: Option<ConnectionHandler>,
+        datagram_vsock_proxy_connection_handler: Option<DatagramHandler>,
     ) -> Result<CommonVmInstance, Error> {
-        let vsock_proxy_connection_handler = vsock_proxy_connection_handler.map(|p| Arc::new(Mutex::new(p)));
+        let stream_vsock_proxy_connection_handler = stream_vsock_proxy_connection_handler.map(|p| Arc::new(Mutex::new(p)));
+        let datagram_vsock_proxy_connection_handler = datagram_vsock_proxy_connection_handler.map(|p| Arc::new(Mutex::new(p)));
         let cid = config.cid;
         let name = config.name.clone();
         let protected = config.protected;
@@ -413,7 +418,8 @@ impl CommonVmInstance {
             payload_state_updated: Condvar::new(),
             requester_uid_name,
             backend,
-            vsock_proxy_connection_handler,
+            stream_vsock_proxy_connection_handler,
+            datagram_vsock_proxy_connection_handler,
         };
         info!("{} created", &instance);
         Ok(instance)
@@ -507,8 +513,13 @@ impl CommonVmInstance {
         // server to eagerly free up the server threads.
         self.vm_context.vm_server.shutdown()?;
 
-        // Stop the vsock proxy instance
-        if let Some(handler) = &self.vsock_proxy_connection_handler {
+        // Stop the stream vsock proxy instance
+        if let Some(handler) = &self.stream_vsock_proxy_connection_handler {
+            handler.lock().unwrap().stop()?;
+        }
+
+        // Stop the datagram vsock proxy instance
+        if let Some(handler) = &self.datagram_vsock_proxy_connection_handler {
             handler.lock().unwrap().stop()?;
         }
 

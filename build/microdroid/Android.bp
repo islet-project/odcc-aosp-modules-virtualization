@@ -112,6 +112,7 @@ android_system_image {
         // provisioning binaries
         "rsictl",
         "ratls_get",
+        "nts_vsock_client",
     ] + select(release_flag("RELEASE_AVF_ENABLE_MULTI_TENANT_MICRODROID_VM"), {
         true: [
             "microdroid_etc_passwd",

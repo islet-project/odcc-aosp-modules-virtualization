@@ -321,6 +321,44 @@ fn set_system_time_from_host(service: &Strong<dyn IVirtualMachineService>) -> Re
     }
 }
 
+fn set_system_time_using_nts() -> Result<()> {
+    info!("Starting set_system_time_using_nts");
+
+    let local_cid = vsock::get_local_cid().context("Could not determine local CID")?;
+    if local_cid % 3 != 0 {
+        return Err(anyhow::anyhow!("local_cid ({}) is invalid", local_cid));
+    }
+
+    let stream_vsock_proxy_port = local_cid.saturating_add(1);
+    let datagram_vsock_proxy_port = local_cid.saturating_add(2);
+
+    info!("stream vsock port {} datagram vsock port {}", stream_vsock_proxy_port, datagram_vsock_proxy_port);
+
+    let mut cmd = Command::new("/system/bin/nts_vsock_client");
+    cmd
+        .arg("--nts-server")
+        .arg("192.168.97.1")
+        .arg("--vsock-stream-cid")
+        .arg("host")
+        .arg("--vsock-stream-port")
+        .arg(stream_vsock_proxy_port.to_string())
+        .arg("--vsock-datagram-cid")
+        .arg("host")
+        .arg("--vsock-datagram-port")
+        .arg(datagram_vsock_proxy_port.to_string())
+        .arg("--conproto")
+        .arg("--set-time")
+        .arg("--verbose");
+    // TODO: add pinned certificate
+
+    let status = cmd.status();
+
+    info!("NTS client status {:?}", status);
+
+    Ok(())
+}
+
+
 fn try_main() -> Result<()> {
     android_logger::init_once(
         android_logger::Config::default()
@@ -562,6 +600,9 @@ fn try_run_payload(
 
     // TODO Currently we're fetching the time from host. In the future we will nneed to implement Secure NTP client over vsock
     set_system_time_from_host(service)?;
+
+    // We're using a prebuilt NTS client that runs over vsock proxy
+    set_system_time_using_nts()?;
 
     info!("boot completed, time to run payload");
     exec_task(task, service).context("Failed to run payload")

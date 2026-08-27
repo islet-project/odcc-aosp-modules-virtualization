@@ -16,13 +16,12 @@ use android_system_virtualization_payload::aidl::android::system::virtualization
 
 pub fn run_provisioning_command(url: &str, ca_cert: &Path, destination: &Path) -> Result<Child> {
 
-    // The provisioning proxy listens on port == (CID of VM) + 1
+    // The stream vsock proxy listens on port == (CID of VM) + 1
     let local_cid = vsock::get_local_cid().context("Could not determine local CID")?;
-    // The CID allocated per VM should be always even
-    if local_cid % 2 != 0 {
-        return Err(anyhow::anyhow!("local_cid ({}) is odd, expected even CID allocated per VM", local_cid));
+    if local_cid % 3 != 0 {
+        return Err(anyhow::anyhow!("local_cid ({}) is invalid", local_cid));
     }
-    let provisioning_proxy_port = local_cid.saturating_add(1);
+    let stream_vsock_proxy_port = local_cid.saturating_add(1);
 
     let mut cmd = Command::new("/system/bin/ratls_get");
     cmd
@@ -35,7 +34,7 @@ pub fn run_provisioning_command(url: &str, ca_cert: &Path, destination: &Path) -
         .arg("--vsock-cid")
         .arg(VMADDR_CID_HOST.to_string())
         .arg("--vsock-port")
-        .arg(provisioning_proxy_port.to_string())
+        .arg(stream_vsock_proxy_port.to_string())
         .arg("--conproto");
     cmd.spawn().context("provisioning failed")
 }

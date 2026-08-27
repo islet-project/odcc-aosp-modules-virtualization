@@ -296,6 +296,33 @@ impl PolicyManager
             );
         }
     }
+
+    /// Adds a single rule to the whitelist
+    /// Returns an error if a rule with the same (address, port) already exists
+    pub fn add_rule(&self, rule: ServerRule) -> io::Result<()>
+    {
+        let mut guard = self
+            .whitelist
+            .write()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        // Check for duplicate (address, port) pair
+        let key = (rule.address.to_lowercase(), rule.port);
+        for existing_rule in guard.iter() {
+            if existing_rule.address.to_lowercase() == key.0 && existing_rule.port == key.1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "Rule for {}:{} already exists in whitelist",
+                        rule.address, rule.port
+                    ),
+                ));
+            }
+        }
+
+        guard.push(rule);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

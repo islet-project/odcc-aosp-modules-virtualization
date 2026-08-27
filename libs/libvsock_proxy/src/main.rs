@@ -149,6 +149,7 @@ fn run_datagram_mode(args: &Args) -> io::Result<()>
         vsock_port: args.vsock_port,
         timeout_secs: args.timeout_secs,
         cache_timeout_secs: args.cache_timeout_secs,
+        vm_cid: args.vm_cid,
     };
 
     let mut handler = DatagramHandler::new(config);

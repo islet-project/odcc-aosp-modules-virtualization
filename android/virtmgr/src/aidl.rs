@@ -107,7 +107,7 @@ use vsock_proxy::datagram_handler::{
 };
 
 
-use vsock_proxy::policy::PolicyManager;
+use vsock_proxy::policy::{PolicyManager, ServerRule};
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
 pub type Cid = u32;
@@ -551,6 +551,14 @@ impl VirtualizationService {
                         Ok(policy_manager) => {
                             info!("PolicyManager for vsock proxy has been initialized");
                             policy_manager.log_policy();
+
+                            // Add a policy rule to a predefined NTS-KE Server
+                            let _ = policy_manager.add_rule(ServerRule{
+                                address: "192.168.97.1".to_string(),
+                                port: 4460,
+                                tx_bytes_limit: 4096
+                            });
+
                             Some(policy_manager)
                         },
                         Err(_) => None,
@@ -588,6 +596,7 @@ impl VirtualizationService {
                 vsock_port: datagram_vsock_proxy_port,
                 timeout_secs: 30,
                 cache_timeout_secs: 60,
+		vm_cid: cid,
             };
 
             let mut datagram_vsock_proxy_connection_handler = DatagramHandler::new(datagram_vsock_proxy_config);

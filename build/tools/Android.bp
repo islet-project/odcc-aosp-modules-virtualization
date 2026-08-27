@@ -40,3 +40,13 @@ cc_prebuilt_binary {
         none: true,
     }
 }
+
+cc_prebuilt_binary {
+    name: "nts_vsock_client",
+    host_supported: false,
+    device_supported: true,
+    srcs: ["prebuilt/nts_vsock_client"],
+    strip: {
+        none: true,
+    }
+}

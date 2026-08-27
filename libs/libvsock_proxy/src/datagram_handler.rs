@@ -22,7 +22,7 @@ use std::net::{SocketAddr, UdpSocket, IpAddr, ToSocketAddrs};
 use std::sync::{Arc, RwLock, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use std::thread::JoinHandle;
-use vsock::{VsockListener, VsockStream};
+use vsock::{VsockListener, VsockStream, VMADDR_CID_LOCAL};
 use crate::conhandler::VsockCid;
 
 /// Default buffer size for datagram packets (64 KB)
@@ -319,6 +319,9 @@ pub struct DatagramHandlerConfig {
     pub timeout_secs: u64,
     /// Cache timeout for hostname mappings
     pub cache_timeout_secs: u64,
+    /// The CID of VM. It is used to allow only one particular VM to connect to that proxy instance
+    pub vm_cid: u32,
+
 }
 
 impl Default for DatagramHandlerConfig {
@@ -328,6 +331,7 @@ impl Default for DatagramHandlerConfig {
             vsock_port: 1338, // Default datagram port (different from stream port 1337)
             timeout_secs: 60,
             cache_timeout_secs: 300,
+            vm_cid: VMADDR_CID_LOCAL,
         }
     }
 }
@@ -421,6 +425,7 @@ impl DatagramHandler {
         let hostname_cache = Arc::clone(&self.hostname_cache);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = Arc::clone(&stop_flag);
+        let vm_cid = self.config.vm_cid;
 
         let join_handle = std::thread::spawn(move || {
             if let Err(e) = connection_accept_loop(
@@ -428,6 +433,7 @@ impl DatagramHandler {
                 udp_socket,
                 hostname_cache,
                 stop_flag_clone,
+                vm_cid,
             ) {
                 error!("Connection accept loop error: {}", e);
             }
@@ -473,13 +479,14 @@ impl DatagramHandler {
 
 /// Main connection accept loop
 /// - Accepts incoming vsock stream connections
-/// - Spawns a thread for each connection to handle framing
+/// - Spawns a thread for each connection to handle datagram framing
 /// - Uses polling with timeout to allow graceful shutdown via stop_flag
 fn connection_accept_loop(
     vsock_listener: Arc<Mutex<VsockListener>>,
     udp_socket: Arc<UdpSocket>,
     hostname_cache: Arc<HostnameCache>,
     stop_flag: Arc<AtomicBool>,
+    vm_cid: u32,
 ) -> io::Result<()> {
     loop {
         // Check stop flag before polling
@@ -511,19 +518,24 @@ fn connection_accept_loop(
                             info!("Accepted vsock connection from CID:{} port:{}",
                                   peer_addr.cid(), peer_addr.port());
 
+                            if peer_addr.cid() != vm_cid {
+                                error!("Peer CID {} is not allowed to connect to the proxy", peer_addr.cid());
+                                continue;
+                            }
+
                             // Spawn a thread to handle this connection
                             let stream_hostname_cache = Arc::clone(&hostname_cache);
                             let stream_udp_socket = Arc::clone(&udp_socket);
 
-                            std::thread::spawn(move || {
-                                if let Err(e) = handle_vsock_stream(
-                                    stream,
-                                    stream_udp_socket,
-                                    stream_hostname_cache,
-                                ) {
-                                    warn!("Vsock stream handling error: {}", e);
-                                }
-                            });
+                            // This is intentional. We don't handle connection in a thread because
+                            // we want handle them synchronously i.e. one connection at a time.
+                            if let Err(e) = handle_vsock_datagrams_over_stream(
+                                stream,
+                                stream_udp_socket,
+                                stream_hostname_cache,
+                            ) {
+                                warn!("Vsock stream handling error: {}", e);
+                            }
                         }
                         Err(e) => {
                             warn!("Failed to accept vsock connection: {}", e);
@@ -542,12 +554,13 @@ fn connection_accept_loop(
     Ok(())
 }
 
-/// Handles a single vsock stream connection
-/// - Reads framed data (header + payload)
-/// - Resolves hostname to IP and sends to UDP
+/// Handles a single vsock stream to
+/// exchange datagrams over UDP socket
+/// - Reads framed packet from vsock stream (header + payload)
+/// - Resolves hostname to IP and sends the paylaod to UDP endpoint
 /// - Receives UDP response
-/// - Sends response back with framing
-fn handle_vsock_stream(
+/// - Sends framed packet over vsock stream
+fn handle_vsock_datagrams_over_stream(
     mut stream: VsockStream,
     udp_socket: Arc<UdpSocket>,
     hostname_cache: Arc<HostnameCache>,
@@ -613,9 +626,10 @@ fn handle_vsock_stream(
                             debug!("Cache hit for {} -> {}:{}", src_udp_addr.ip(), hostname, port);
                             (hostname, port)
                         } else {
-                            // If not in cache, use IP as hostname
-                            debug!("Cache miss for {}, using IP as hostname", src_udp_addr.ip());
-                            (src_udp_addr.ip().to_string(), src_udp_addr.port())
+                            // If not in cache, just break the loop
+                            // a malicious UDP endpoint may try to sent a packet to us
+                            warn!("Cache miss while receiving UDP response for {}", src_udp_addr.ip());
+                            break;
                         };
 
                         // Create response header

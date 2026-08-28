@@ -100,6 +100,18 @@ const ENCRYPTEDSTORE_FIXED_SERIAL: &str = "encryptedstore";
 
 const DICE_CHAIN_FILE: &str = "/microdroid_resources/dice_chain.raw";
 
+/// There are 3 CIDs allocated per VM, one for communication with the payload and two ports
+/// for the stream and datagram vsock proxy instances.
+pub const VSOCK_CID_STRIDE: u32 = 3;
+/// The offset defining the port of the stream vsock proxy running on the host
+pub const STREAM_VSOCK_PROXY_PORT_OFFSET: u32 = 1;
+/// The offset defining the port of the datagram vsock proxy running on the host
+pub const DATAGRA_VSOCK_PROXY_PORT_OFFSET: u32 = 2;
+
+// A development NTS server that runs locally and the server's certificate that the NTS client trusts.
+const NTS_SERVER_ADDR: &str = "192.168.97.1";
+const NTS_SERVER_CERT: &str = "/system/etc/certs/nts-devel.crt";
+
 #[derive(thiserror::Error, Debug)]
 enum MicrodroidError {
     #[error("Cannot connect to virtualization service: {0}")]
@@ -325,19 +337,17 @@ fn set_system_time_using_nts() -> Result<()> {
     info!("Starting set_system_time_using_nts");
 
     let local_cid = vsock::get_local_cid().context("Could not determine local CID")?;
-    if local_cid % 3 != 0 {
+    if local_cid % VSOCK_CID_STRIDE != 0 {
         return Err(anyhow::anyhow!("local_cid ({}) is invalid", local_cid));
     }
 
-    let stream_vsock_proxy_port = local_cid.saturating_add(1);
-    let datagram_vsock_proxy_port = local_cid.saturating_add(2);
-
-    info!("stream vsock port {} datagram vsock port {}", stream_vsock_proxy_port, datagram_vsock_proxy_port);
+    let stream_vsock_proxy_port = local_cid.saturating_add(STREAM_VSOCK_PROXY_PORT_OFFSET);
+    let datagram_vsock_proxy_port = local_cid.saturating_add(DATAGRA_VSOCK_PROXY_PORT_OFFSET);
 
     let mut cmd = Command::new("/system/bin/nts_vsock_client");
     cmd
         .arg("--nts-server")
-        .arg("192.168.97.1")
+        .arg(NTS_SERVER_ADDR)
         .arg("--vsock-stream-cid")
         .arg("host")
         .arg("--vsock-stream-port")
@@ -347,13 +357,10 @@ fn set_system_time_using_nts() -> Result<()> {
         .arg("--vsock-datagram-port")
         .arg(datagram_vsock_proxy_port.to_string())
         .arg("--conproto")
-        .arg("--set-time")
-        .arg("--verbose");
-    // TODO: add pinned certificate
-
-    let status = cmd.status();
-
-    info!("NTS client status {:?}", status);
+        .arg("--pinned-cert-path")
+        .arg(NTS_SERVER_CERT)
+        .arg("--set-time");
+    cmd.status()?;
 
     Ok(())
 }

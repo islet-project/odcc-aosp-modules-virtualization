@@ -11,17 +11,18 @@ use std::os::unix::io::RawFd;
 use std::path::{Path, Component};
 use std::process::{Child, Command};
 use url::Url;
-
 use android_system_virtualization_payload::aidl::android::system::virtualization::payload::IVmPayloadService::VM_APK_CONTENTS_PATH;
+
+use crate::{VSOCK_CID_STRIDE, STREAM_VSOCK_PROXY_PORT_OFFSET};
 
 pub fn run_provisioning_command(url: &str, ca_cert: &Path, destination: &Path) -> Result<Child> {
 
     // The stream vsock proxy listens on port == (CID of VM) + 1
     let local_cid = vsock::get_local_cid().context("Could not determine local CID")?;
-    if local_cid % 3 != 0 {
+    if local_cid % VSOCK_CID_STRIDE != 0 {
         return Err(anyhow::anyhow!("local_cid ({}) is invalid", local_cid));
     }
-    let stream_vsock_proxy_port = local_cid.saturating_add(1);
+    let stream_vsock_proxy_port = local_cid.saturating_add(STREAM_VSOCK_PROXY_PORT_OFFSET);
 
     let mut cmd = Command::new("/system/bin/ratls_get");
     cmd

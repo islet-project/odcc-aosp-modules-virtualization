@@ -25,6 +25,27 @@ fn normalize_address(address: String) -> String
     address
 }
 
+/// The protocol used by a server policy rule
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+pub enum Protocol
+{
+    /// TCP protocol
+    Tcp,
+    /// UDP protocol
+    Udp,
+}
+
+impl std::fmt::Display for Protocol
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+    {
+        match self {
+            Protocol::Tcp => write!(f, "TCP"),
+            Protocol::Udp => write!(f, "UDP"),
+        }
+    }
+}
+
 /// Rule defining access policy for a specific server
 /// This struct contains only configuration data from the JSON policy file
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +55,8 @@ pub struct ServerRule
     pub address: String,
     /// Server port number
     pub port: u16,
+    /// Protocol TCP/UDP
+    pub protocol: Protocol,
     /// Maximum number of bytes that can be sent to this server
     pub tx_bytes_limit: u64,
 }
@@ -42,7 +65,7 @@ pub struct ServerRule
 pub type ServerWhitelist = Vec<ServerRule>;
 
 /// Key for identifying a server in the stats map
-type ServerKey = (String, u16);
+type ServerKey = (String, u16, Protocol);
 
 /// Runtime statistics for servers, tracking cumulative TX bytes used
 pub struct ServerStatsHashMap
@@ -61,10 +84,10 @@ impl ServerStatsHashMap
     }
 
     /// Gets or creates a counter for the given server
-    pub fn get_or_create_counter(&mut self, address: &str, port: u16) -> Arc<AtomicU64>
+    pub fn get_or_create_counter(&mut self, address: &str, port: u16, protocol: Protocol) -> Arc<AtomicU64>
     {
         let normalized = normalize_address(address.to_string());
-        let key = (normalized.to_lowercase(), port);
+        let key = (normalized.to_lowercase(), port, protocol);
         self.stats
             .entry(key)
             .or_insert_with(|| Arc::new(AtomicU64::new(0)))
@@ -108,11 +131,11 @@ impl PolicyManager
 
     fn init(&self, whitelist: &ServerWhitelist) -> io::Result<()>
     {
-        // Check for duplicate (address, port) pairs
-        let mut seen_rules: HashSet<(String, u16)> = HashSet::new();
+        // Check for duplicate (address, port, protocol) triples
+        let mut seen_rules: HashSet<(String, u16, Protocol)> = HashSet::new();
         for rule in whitelist {
-            let key = (rule.address.to_lowercase(), rule.port);
-            if !seen_rules.insert(key.clone()) {
+            let key = (rule.address.to_lowercase(), rule.port, rule.protocol);
+            if !seen_rules.insert(key) {
                 return Err(io::Error::new(std::io::ErrorKind::InvalidData, "Duplicates detected in whitelist"));
             }
         }
@@ -150,12 +173,12 @@ impl PolicyManager
     }
 
     /// Checks if a particular server (address:port) is on the whitelist
-    pub fn is_allowed(&self, address: &str, port: u16) -> bool
+    pub fn is_allowed(&self, address: &str, port: u16, protocol: Protocol) -> bool
     {
         let guard = self.whitelist.read().expect("Failed to acquire read lock");
 
         for rule in guard.iter() {
-            if rule.port == port && self.addresses_match(&rule.address, address) {
+            if rule.port == port && self.addresses_match(&rule.address, address) && rule.protocol == protocol {
                 return true;
             }
         }
@@ -164,12 +187,12 @@ impl PolicyManager
     }
 
     /// Gets the TX bytes limit for a specific server
-    pub fn tx_bytes_limit(&self, address: &str, port: u16) -> Option<u64>
+    pub fn tx_bytes_limit(&self, address: &str, port: u16, protocol: Protocol) -> Option<u64>
     {
         let guard = self.whitelist.read().expect("Failed to acquire read lock");
 
         for rule in guard.iter() {
-            if rule.port == port && self.addresses_match(&rule.address, address) {
+            if rule.port == port && self.addresses_match(&rule.address, address) && rule.protocol == protocol {
                 return Some(rule.tx_bytes_limit);
             }
         }
@@ -179,13 +202,13 @@ impl PolicyManager
 
     /// Gets the current TX bytes used for a specific server
     /// Creates a counter if one doesn't exist yet
-    pub fn tx_bytes_used(&self, address: &str, port: u16) -> u64
+    pub fn tx_bytes_used(&self, address: &str, port: u16, protocol: Protocol) -> u64
     {
         let mut stats_guard = self
             .stats
             .write()
             .expect("Failed to acquire stats write lock");
-        let counter = stats_guard.get_or_create_counter(address, port);
+        let counter = stats_guard.get_or_create_counter(address, port, protocol);
         counter.load(Ordering::SeqCst)
     }
 
@@ -195,6 +218,7 @@ impl PolicyManager
         &self,
         address: &str,
         port: u16,
+        protocol: Protocol,
         bytes_to_add: u64,
     ) -> Result<(), std::io::Error>
     {
@@ -202,7 +226,7 @@ impl PolicyManager
         let whitelist_guard = self.whitelist.read().expect("Failed to acquire read lock");
         let tx_bytes_limit = whitelist_guard
             .iter()
-            .find(|rule| rule.port == port && self.addresses_match(&rule.address, address))
+            .find(|rule| rule.port == port && self.addresses_match(&rule.address, address) && rule.protocol == protocol)
             .map(|rule| rule.tx_bytes_limit)
             .ok_or_else(|| {
                 std::io::Error::new(
@@ -216,7 +240,7 @@ impl PolicyManager
             .stats
             .write()
             .expect("Failed to acquire stats write lock");
-        let counter = stats_guard.get_or_create_counter(address, port);
+        let counter = stats_guard.get_or_create_counter(address, port, protocol);
 
         // Check and add atomically using fetch_update (handles retry loop internally)
         counter
@@ -279,20 +303,20 @@ impl PolicyManager
         info!("Loaded policy with {} rules:", whitelist_guard.len());
         for rule in whitelist_guard.iter() {
             info!(
-                "  - address: {}, port: {}, tx_bytes_limit: {}",
-                rule.address, rule.port, rule.tx_bytes_limit
+                "  - address: {}, port: {}, protocol: {}, tx_bytes_limit: {}",
+                rule.address, rule.port, rule.protocol, rule.tx_bytes_limit
             );
         }
     }
 
     /// Logs connection completion with cumulative TX bytes used for the server
-    pub fn log_connection_complete(&self, address: &str, port: u16)
+    pub fn log_connection_complete(&self, address: &str, port: u16, protocol: Protocol)
     {
-        if let Some(limit) = self.tx_bytes_limit(address, port) {
-            let used = self.tx_bytes_used(address, port);
+        if let Some(limit) = self.tx_bytes_limit(address, port, protocol) {
+            let used = self.tx_bytes_used(address, port, protocol);
             info!(
-                "  TX: used {} / {} bytes (cumulative) Server {}:{}",
-                used, limit, address, port,
+                "  TX: used {} / {} bytes (cumulative) {} Server {}:{} ",
+                used, limit, protocol, address, port,
             );
         }
     }
@@ -307,9 +331,9 @@ impl PolicyManager
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
         // Check for duplicate (address, port) pair
-        let key = (rule.address.to_lowercase(), rule.port);
+        let key = (rule.address.to_lowercase(), rule.port, rule.protocol);
         for existing_rule in guard.iter() {
-            if existing_rule.address.to_lowercase() == key.0 && existing_rule.port == key.1 {
+            if existing_rule.address.to_lowercase() == key.0 && existing_rule.port == key.1 && existing_rule.protocol == key.2 {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!(
@@ -339,8 +363,8 @@ mod tests
 
         // Create a temporary test file
         let test_content = r#"[
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 1024},
-            {"address": "192.168.1.1", "port": 8080, "tx_bytes_limit": 2048}
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024},
+            {"address": "192.168.1.1", "port": 8080, "protocol": "Tcp", "tx_bytes_limit": 2048}
         ]"#;
 
         let test_file = "/tmp/test_policy.json";
@@ -359,7 +383,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 1024}
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024}
         ]"#;
 
         let test_file = "/tmp/test_policy2.json";
@@ -368,9 +392,9 @@ mod tests
 
         manager.load_from_file(test_file).unwrap();
 
-        assert!(manager.is_allowed("example.com", 443));
-        assert!(!manager.is_allowed("example.com", 80));
-        assert!(!manager.is_allowed("other.com", 443));
+        assert!(manager.is_allowed("example.com", 443, Protocol::Tcp));
+        assert!(!manager.is_allowed("example.com", 80, Protocol::Tcp));
+        assert!(!manager.is_allowed("other.com", 443, Protocol::Tcp));
 
         fs::remove_file(test_file).ok();
     }
@@ -381,7 +405,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 1024}
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024}
         ]"#;
 
         let test_file = "/tmp/test_policy3.json";
@@ -390,8 +414,8 @@ mod tests
 
         manager.load_from_file(test_file).unwrap();
 
-        assert_eq!(manager.tx_bytes_limit("example.com", 443), Some(1024));
-        assert_eq!(manager.tx_bytes_limit("example.com", 80), None);
+        assert_eq!(manager.tx_bytes_limit("example.com", 443, Protocol::Tcp), Some(1024));
+        assert_eq!(manager.tx_bytes_limit("example.com", 80, Protocol::Tcp), None);
 
         fs::remove_file(test_file).ok();
     }
@@ -401,10 +425,10 @@ mod tests
     {
         let manager = PolicyManager::new();
 
-        // Test duplicate address and port
+        // Test duplicate address, port, and protocol
         let test_content = r#"[
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 1024},
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 2048}
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024},
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 2048}
         ]"#;
 
         let test_file = "/tmp/test_policy_dup.json";
@@ -416,8 +440,8 @@ mod tests
 
         // Test case-insensitive duplicate detection
         let test_content = r#"[
-            {"address": "Example.com", "port": 443, "tx_bytes_limit": 1024},
-            {"address": "EXAMPLE.COM", "port": 443, "tx_bytes_limit": 2048}
+            {"address": "Example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024},
+            {"address": "EXAMPLE.COM", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 2048}
         ]"#;
 
         let mut file = File::create(test_file).unwrap();
@@ -436,7 +460,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 1024}
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024}
         ]"#;
 
         let test_file = "/tmp/test_policy_bytes.json";
@@ -446,13 +470,13 @@ mod tests
         manager.load_from_file(test_file).unwrap();
 
         // Initially, tx_bytes_used returns 0 (counter created on first call)
-        assert_eq!(manager.tx_bytes_used("example.com", 443), 0);
+        assert_eq!(manager.tx_bytes_used("example.com", 443, Protocol::Tcp), 0);
 
         // After first transmission, counter is updated
         assert!(manager
-            .check_and_add_tx_bytes("example.com", 443, 100)
+            .check_and_add_tx_bytes("example.com", 443, Protocol::Tcp, 100)
             .is_ok());
-        assert_eq!(manager.tx_bytes_used("example.com", 443), 100);
+        assert_eq!(manager.tx_bytes_used("example.com", 443, Protocol::Tcp), 100);
 
         fs::remove_file(test_file).ok();
     }
@@ -463,7 +487,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 1000}
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1000}
         ]"#;
 
         let test_file = "/tmp/test_policy_check_add.json";
@@ -474,32 +498,32 @@ mod tests
 
         // First addition should succeed
         assert!(manager
-            .check_and_add_tx_bytes("example.com", 443, 100)
+            .check_and_add_tx_bytes("example.com", 443, Protocol::Tcp, 100)
             .is_ok());
-        assert_eq!(manager.tx_bytes_used("example.com", 443), 100);
+        assert_eq!(manager.tx_bytes_used("example.com", 443, Protocol::Tcp), 100);
 
         // Second addition should succeed
         assert!(manager
-            .check_and_add_tx_bytes("example.com", 443, 200)
+            .check_and_add_tx_bytes("example.com", 443, Protocol::Tcp, 200)
             .is_ok());
-        assert_eq!(manager.tx_bytes_used("example.com", 443), 300);
+        assert_eq!(manager.tx_bytes_used("example.com", 443, Protocol::Tcp), 300);
 
         // Third addition that would exceed limit should fail
         assert!(manager
-            .check_and_add_tx_bytes("example.com", 443, 800)
+            .check_and_add_tx_bytes("example.com", 443, Protocol::Tcp, 800)
             .is_err());
         // Counter should remain unchanged after failed addition
-        assert_eq!(manager.tx_bytes_used("example.com", 443), 300);
+        assert_eq!(manager.tx_bytes_used("example.com", 443, Protocol::Tcp), 300);
 
         // Addition that brings exactly to limit should succeed
         assert!(manager
-            .check_and_add_tx_bytes("example.com", 443, 700)
+            .check_and_add_tx_bytes("example.com", 443, Protocol::Tcp, 700)
             .is_ok());
-        assert_eq!(manager.tx_bytes_used("example.com", 443), 1000);
+        assert_eq!(manager.tx_bytes_used("example.com", 443, Protocol::Tcp), 1000);
 
         // Any further addition should fail
         assert!(manager
-            .check_and_add_tx_bytes("example.com", 443, 1)
+            .check_and_add_tx_bytes("example.com", 443, Protocol::Tcp, 1)
             .is_err());
 
         fs::remove_file(test_file).ok();
@@ -511,7 +535,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 1000}
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1000}
         ]"#;
 
         let test_file = "/tmp/test_policy_unknown.json";
@@ -521,7 +545,7 @@ mod tests
         manager.load_from_file(test_file).unwrap();
 
         // Adding bytes to unknown server should fail
-        let result = manager.check_and_add_tx_bytes("unknown.com", 443, 100);
+        let result = manager.check_and_add_tx_bytes("unknown.com", 443, Protocol::Tcp, 100);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().kind(),
@@ -529,7 +553,7 @@ mod tests
         );
 
         // Adding bytes to known server but unknown port should fail
-        let result = manager.check_and_add_tx_bytes("example.com", 80, 100);
+        let result = manager.check_and_add_tx_bytes("example.com", 80, Protocol::Tcp, 100);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().kind(),
@@ -545,7 +569,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "example.com", "port": 443, "tx_bytes_limit": 10000}
+            {"address": "example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 10000}
         ]"#;
 
         let test_file = "/tmp/test_policy_cumulative.json";
@@ -557,9 +581,9 @@ mod tests
         // Simulate multiple sessions adding bytes
         for i in 1..=10 {
             assert!(manager
-                .check_and_add_tx_bytes("example.com", 443, 100)
+                .check_and_add_tx_bytes("example.com", 443, Protocol::Tcp, 100)
                 .is_ok());
-            assert_eq!(manager.tx_bytes_used("example.com", 443), i * 100);
+            assert_eq!(manager.tx_bytes_used("example.com", 443, Protocol::Tcp), i * 100);
         }
 
         fs::remove_file(test_file).ok();
@@ -571,8 +595,8 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "server1.com", "port": 443, "tx_bytes_limit": 1000},
-            {"address": "server2.com", "port": 443, "tx_bytes_limit": 2000}
+            {"address": "server1.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1000},
+            {"address": "server2.com", "port": 443, "protocol": "Udp", "tx_bytes_limit": 2000}
         ]"#;
 
         let test_file = "/tmp/test_policy_multi.json";
@@ -582,39 +606,39 @@ mod tests
         manager.load_from_file(test_file).unwrap();
 
         // Initially, counters return 0
-        assert_eq!(manager.tx_bytes_used("server1.com", 443), 0);
-        assert_eq!(manager.tx_bytes_used("server2.com", 443), 0);
+        assert_eq!(manager.tx_bytes_used("server1.com", 443, Protocol::Tcp), 0);
+        assert_eq!(manager.tx_bytes_used("server2.com", 443, Protocol::Tcp), 0);
 
         // Add bytes to server1
         assert!(manager
-            .check_and_add_tx_bytes("server1.com", 443, 500)
+            .check_and_add_tx_bytes("server1.com", 443, Protocol::Tcp, 500)
             .is_ok());
-        assert_eq!(manager.tx_bytes_used("server1.com", 443), 500);
-        assert_eq!(manager.tx_bytes_used("server2.com", 443), 0);
+        assert_eq!(manager.tx_bytes_used("server1.com", 443, Protocol::Tcp), 500);
+        assert_eq!(manager.tx_bytes_used("server2.com", 443, Protocol::Tcp), 0);
 
         // Add bytes to server2
         assert!(manager
-            .check_and_add_tx_bytes("server2.com", 443, 1500)
+            .check_and_add_tx_bytes("server2.com", 443, Protocol::Udp, 1500)
             .is_ok());
-        assert_eq!(manager.tx_bytes_used("server1.com", 443), 500);
-        assert_eq!(manager.tx_bytes_used("server2.com", 443), 1500);
+        assert_eq!(manager.tx_bytes_used("server1.com", 443, Protocol::Tcp), 500);
+        assert_eq!(manager.tx_bytes_used("server2.com", 443, Protocol::Udp), 1500);
 
         // server1 should still have room for 500 more
         assert!(manager
-            .check_and_add_tx_bytes("server1.com", 443, 500)
+            .check_and_add_tx_bytes("server1.com", 443, Protocol::Tcp, 500)
             .is_ok());
-        assert_eq!(manager.tx_bytes_used("server1.com", 443), 1000);
+        assert_eq!(manager.tx_bytes_used("server1.com", 443, Protocol::Tcp), 1000);
 
         // server1 is now at limit
         assert!(manager
-            .check_and_add_tx_bytes("server1.com", 443, 1)
+            .check_and_add_tx_bytes("server1.com", 443, Protocol::Tcp, 1)
             .is_err());
 
         // server2 should still have room for 500 more
         assert!(manager
-            .check_and_add_tx_bytes("server2.com", 443, 500)
+            .check_and_add_tx_bytes("server2.com", 443, Protocol::Udp, 500)
             .is_ok());
-        assert_eq!(manager.tx_bytes_used("server2.com", 443), 2000);
+        assert_eq!(manager.tx_bytes_used("server2.com", 443, Protocol::Udp), 2000);
 
         fs::remove_file(test_file).ok();
     }
@@ -678,7 +702,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "192.168.1.1", "port": 443, "tx_bytes_limit": 1024}
+            {"address": "192.168.1.1", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024}
         ]"#;
 
         let test_file = "/tmp/test_policy_addr_match.json";
@@ -688,9 +712,9 @@ mod tests
         manager.load_from_file(test_file).unwrap();
 
         // IPv4 should match same IPv4
-        assert!(manager.is_allowed("192.168.1.1", 443));
+        assert!(manager.is_allowed("192.168.1.1", 443, Protocol::Tcp));
         // Different IPv4 should not match
-        assert!(!manager.is_allowed("192.168.1.2", 443));
+        assert!(!manager.is_allowed("192.168.1.2", 443, Protocol::Tcp));
 
         fs::remove_file(test_file).ok();
     }
@@ -701,7 +725,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "192.168.1.1", "port": 443, "tx_bytes_limit": 1024}
+            {"address": "192.168.1.1", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024}
         ]"#;
 
         let test_file = "/tmp/test_policy_ipv6_mapped.json";
@@ -711,7 +735,7 @@ mod tests
         manager.load_from_file(test_file).unwrap();
 
         // IPv6-mapped IPv4 should match the IPv4 rule
-        assert!(manager.is_allowed("::ffff:192.168.1.1", 443));
+        assert!(manager.is_allowed("::ffff:192.168.1.1", 443, Protocol::Tcp));
 
         fs::remove_file(test_file).ok();
     }
@@ -722,7 +746,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "Example.com", "port": 443, "tx_bytes_limit": 1024}
+            {"address": "Example.com", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024}
         ]"#;
 
         let test_file = "/tmp/test_policy_case.json";
@@ -732,9 +756,9 @@ mod tests
         manager.load_from_file(test_file).unwrap();
 
         // Domain matching should be case-insensitive
-        assert!(manager.is_allowed("example.com", 443));
-        assert!(manager.is_allowed("EXAMPLE.COM", 443));
-        assert!(manager.is_allowed("Example.COM", 443));
+        assert!(manager.is_allowed("example.com", 443, Protocol::Tcp));
+        assert!(manager.is_allowed("EXAMPLE.COM", 443, Protocol::Tcp));
+        assert!(manager.is_allowed("Example.COM", 443, Protocol::Tcp));
 
         fs::remove_file(test_file).ok();
     }
@@ -745,7 +769,7 @@ mod tests
         let manager = PolicyManager::new();
 
         let test_content = r#"[
-            {"address": "::1", "port": 443, "tx_bytes_limit": 1024}
+            {"address": "::1", "port": 443, "protocol": "Tcp", "tx_bytes_limit": 1024}
         ]"#;
 
         let test_file = "/tmp/test_policy_ipv6.json";
@@ -755,9 +779,9 @@ mod tests
         manager.load_from_file(test_file).unwrap();
 
         // IPv6 should match same IPv6
-        assert!(manager.is_allowed("::1", 443));
+        assert!(manager.is_allowed("::1", 443, Protocol::Tcp));
         // Different IPv6 should not match
-        assert!(!manager.is_allowed("::2", 443));
+        assert!(!manager.is_allowed("::2", 443, Protocol::Tcp));
 
         fs::remove_file(test_file).ok();
     }

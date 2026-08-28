@@ -4,7 +4,7 @@
 //! and proxying them to TCP servers.
 
 use crate::conproto::{receive_connection_request, send_connection_response};
-use crate::policy::PolicyManager;
+use crate::policy::{PolicyManager, Protocol};
 use crate::stream_helpers::copy_bidirectional;
 use clap::ValueEnum;
 use log::{debug, error, info};
@@ -358,7 +358,7 @@ fn handle_vsock_connection(
     // Check if connection is allowed by policy
     if let Some(manager) = policy_manager
     {
-        if !manager.is_allowed(host_for_policy, port_for_policy)
+        if !manager.is_allowed(host_for_policy, port_for_policy, Protocol::Tcp)
         {
             error!(
                 "Connection to {}:{} is not allowed by policy",

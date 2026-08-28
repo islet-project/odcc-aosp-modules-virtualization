@@ -98,20 +98,7 @@ fn run_stream_mode(args: &Args) -> io::Result<()>
 {
     info!("Running in stream mode (vsock stream -> TCP)");
 
-    let policy_manager = if let Some(policy_file) = &args.policy_file {
-        let manager = PolicyManager::new();
-        manager.load_from_file(policy_file).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to load policy file '{}': {}", policy_file, e),
-            )
-        })?;
-        info!("Successfully loaded policy from '{}'", policy_file);
-        manager.log_policy();
-        Some(Arc::new(manager))
-    } else {
-        None
-    };
+    let policy_manager = create_policy_manager(&args.policy_file)?;
 
     let server_addr = if args.conproto {
         None
@@ -125,7 +112,7 @@ fn run_stream_mode(args: &Args) -> io::Result<()>
         server_addr,
         conproto: args.conproto,
         timeout_secs: args.timeout_secs,
-        policy_manager,
+        policy_manager: policy_manager.clone(),
         vm_cid: args.vm_cid,
     };
 
@@ -144,12 +131,15 @@ fn run_datagram_mode(args: &Args) -> io::Result<()>
 {
     info!("Running in datagram mode (vsock datagram -> UDP)");
 
+    let policy_manager = create_policy_manager(&args.policy_file)?;
+
     let config = DatagramHandlerConfig {
         vsock_cid: args.vsock_cid,
         vsock_port: args.vsock_port,
         timeout_secs: args.timeout_secs,
         cache_timeout_secs: args.cache_timeout_secs,
         vm_cid: args.vm_cid,
+        policy_manager,
     };
 
     let mut handler = DatagramHandler::new(config);
@@ -161,4 +151,23 @@ fn run_datagram_mode(args: &Args) -> io::Result<()>
     handler.join()?;
 
     Ok(())
+}
+
+/// Creates a policy manager from the given policy file path
+/// Returns None if no policy file is provided
+fn create_policy_manager(policy_file: &Option<String>) -> io::Result<Option<Arc<PolicyManager>>> {
+    if let Some(policy_file) = policy_file {
+        let manager = PolicyManager::new();
+        manager.load_from_file(policy_file).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to load policy file '{}': {}", policy_file, e),
+            )
+        })?;
+        info!("Successfully loaded policy from '{}'", policy_file);
+        manager.log_policy();
+        Ok(Some(Arc::new(manager)))
+    } else {
+        Ok(None)
+    }
 }

@@ -107,7 +107,7 @@ use vsock_proxy::datagram_handler::{
 };
 
 
-use vsock_proxy::policy::{PolicyManager, ServerRule};
+use vsock_proxy::policy::{PolicyManager, Protocol, ServerRule};
 
 /// The unique ID of a VM used (together with a port number) for vsock communication.
 pub type Cid = u32;
@@ -116,7 +116,16 @@ pub const PROHIBITED_VSOCK_PROXY_PORT: VsockProxyPort = 0;
 
 pub const BINDER_SERVICE_IDENTIFIER: &str = "android.system.virtualizationservice";
 
+/// The while list file containing the policy for provisioning proxy.
+/// This file should be put into assets folder of the service proxy application.
 const VSOCK_PROXY_WHITELIST_FILE: &str = "assets/whitelist.json";
+
+/// This address is only for deveopment purposes. It regards the NTS server running
+/// locally on the Linux host machine that is running AOSP distribution on the emulator.
+/// In production environments, the list of trusted NTS servers should be provided accordingly.
+const DEFAULT_NTS_SERVER_ADDR: &str = "192.168.97.1";
+const DEFAULT_NTS_KE_PORT: u16 = 4460;
+const DEFAULT_NTP_PORT: u16 = 123;
 
 /// The size of zero.img.
 /// Gaps in composite disk images are filled with a shared zero.img.
@@ -542,38 +551,47 @@ impl VirtualizationService {
             check_use_custom_virtual_machine()?;
         }
 
+        let policy_manager = match config {
+            VirtualMachineConfig::AppConfig(config) => {
+                let apk_file = clone_file(config.apk.as_ref().unwrap())?;
+                match initialize_vsock_proxy_policymanager_from_file(&apk_file, VSOCK_PROXY_WHITELIST_FILE) {
+                    Ok(policy_manager) => {
+                        info!("PolicyManager for vsock proxy has been initialized");
+                        policy_manager.log_policy();
+
+                        // Add a policy rule to a predefined NTS-KE Server
+                        let _ = policy_manager.add_rule(ServerRule{
+                            address: DEFAULT_NTS_SERVER_ADDR.to_string(),
+                            port: DEFAULT_NTS_KE_PORT,
+                            protocol: Protocol::Tcp,
+                            tx_bytes_limit: 4096
+                        });
+
+                        // Add a policy rule to a predefined NTP Server
+                        let _ = policy_manager.add_rule(ServerRule{
+                            address: DEFAULT_NTS_SERVER_ADDR.to_string(),
+                            port: DEFAULT_NTP_PORT,
+                            protocol: Protocol::Udp,
+                            tx_bytes_limit: 1024
+                        });
+
+                        Some(policy_manager)
+                    },
+                    Err(_) => None,
+                }
+            },
+            VirtualMachineConfig::RawConfig(_) => None,
+        };
+
         // Setup stream vsock proxy
         let stream_vsock_proxy_connection_handler = if stream_vsock_proxy_port != PROHIBITED_VSOCK_PROXY_PORT {
-            let policy_manager = match config {
-                VirtualMachineConfig::AppConfig(config) => {
-                    let apk_file = clone_file(config.apk.as_ref().unwrap())?;
-                    match initialize_vsock_proxy_policymanager_from_file(&apk_file, VSOCK_PROXY_WHITELIST_FILE) {
-                        Ok(policy_manager) => {
-                            info!("PolicyManager for vsock proxy has been initialized");
-                            policy_manager.log_policy();
-
-                            // Add a policy rule to a predefined NTS-KE Server
-                            let _ = policy_manager.add_rule(ServerRule{
-                                address: "192.168.97.1".to_string(),
-                                port: 4460,
-                                tx_bytes_limit: 4096
-                            });
-
-                            Some(policy_manager)
-                        },
-                        Err(_) => None,
-                    }
-                },
-                VirtualMachineConfig::RawConfig(_) => None,
-            };
-
             let stream_vsock_proxy_config = ConnectionHandlerConfig {
                 vsock_cid: VsockCid::Host,
                 vsock_port: stream_vsock_proxy_port,
                 server_addr: None,
                 conproto: true,
                 timeout_secs: 30,
-                policy_manager,
+                policy_manager: policy_manager.clone(),
                 vm_cid: cid,
             };
 
@@ -596,7 +614,8 @@ impl VirtualizationService {
                 vsock_port: datagram_vsock_proxy_port,
                 timeout_secs: 30,
                 cache_timeout_secs: 60,
-		vm_cid: cid,
+                policy_manager: policy_manager.clone(),
+                vm_cid: cid,
             };
 
             let mut datagram_vsock_proxy_connection_handler = DatagramHandler::new(datagram_vsock_proxy_config);

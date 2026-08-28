@@ -24,6 +24,7 @@ use std::time::Duration;
 use std::thread::JoinHandle;
 use vsock::{VsockListener, VsockStream, VMADDR_CID_LOCAL};
 use crate::conhandler::VsockCid;
+use crate::policy::{PolicyManager, Protocol};
 
 /// Default buffer size for datagram packets (64 KB)
 pub const DATAGRAM_BUFFER_SIZE: usize = 65536;
@@ -309,7 +310,7 @@ impl DatagramHeader {
 }
 
 /// Configuration for the datagram handler
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DatagramHandlerConfig {
     /// The CID of the vsock listening socket
     pub vsock_cid: VsockCid,
@@ -319,9 +320,23 @@ pub struct DatagramHandlerConfig {
     pub timeout_secs: u64,
     /// Cache timeout for hostname mappings
     pub cache_timeout_secs: u64,
+    /// A policy manager instance controlling the white-list of UDP servers
+    pub policy_manager: Option<Arc<PolicyManager>>,
     /// The CID of VM. It is used to allow only one particular VM to connect to that proxy instance
     pub vm_cid: u32,
+}
 
+impl std::fmt::Debug for DatagramHandlerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatagramHandlerConfig")
+            .field("vsock_cid", &self.vsock_cid)
+            .field("vsock_port", &self.vsock_port)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("cache_timeout_secs", &self.cache_timeout_secs)
+            .field("vm_cid", &self.vm_cid)
+            .field("policy_manager", &self.policy_manager.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 impl Default for DatagramHandlerConfig {
@@ -332,6 +347,7 @@ impl Default for DatagramHandlerConfig {
             timeout_secs: 60,
             cache_timeout_secs: 300,
             vm_cid: VMADDR_CID_LOCAL,
+            policy_manager: None,
         }
     }
 }
@@ -350,6 +366,7 @@ pub struct DatagramHandler {
     udp_socket: Option<Arc<UdpSocket>>,
     vsock_listener: Option<Arc<Mutex<VsockListener>>>,
     datagram_listener: Option<DatagramListener>,
+    policy_manager: Option<Arc<PolicyManager>>,
 }
 
 impl fmt::Debug for DatagramHandler {
@@ -380,6 +397,7 @@ impl DatagramHandler {
             udp_socket: None,
             vsock_listener: None,
             datagram_listener: None,
+            policy_manager: None,
         }
     }
 
@@ -426,6 +444,8 @@ impl DatagramHandler {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = Arc::clone(&stop_flag);
         let vm_cid = self.config.vm_cid;
+        let policy_manager = self.config.policy_manager.clone();
+        self.policy_manager = policy_manager.clone();
 
         let join_handle = std::thread::spawn(move || {
             if let Err(e) = connection_accept_loop(
@@ -434,6 +454,7 @@ impl DatagramHandler {
                 hostname_cache,
                 stop_flag_clone,
                 vm_cid,
+                policy_manager,
             ) {
                 error!("Connection accept loop error: {}", e);
             }
@@ -487,6 +508,7 @@ fn connection_accept_loop(
     hostname_cache: Arc<HostnameCache>,
     stop_flag: Arc<AtomicBool>,
     vm_cid: u32,
+    policy_manager: Option<Arc<PolicyManager>>,
 ) -> io::Result<()> {
     loop {
         // Check stop flag before polling
@@ -526,6 +548,7 @@ fn connection_accept_loop(
                             // Spawn a thread to handle this connection
                             let stream_hostname_cache = Arc::clone(&hostname_cache);
                             let stream_udp_socket = Arc::clone(&udp_socket);
+                            let stream_policy_manager = policy_manager.clone();
 
                             // This is intentional. We don't handle connection in a thread because
                             // we want handle them synchronously i.e. one connection at a time.
@@ -533,6 +556,7 @@ fn connection_accept_loop(
                                 stream,
                                 stream_udp_socket,
                                 stream_hostname_cache,
+                                stream_policy_manager,
                             ) {
                                 warn!("Vsock stream handling error: {}", e);
                             }
@@ -557,13 +581,14 @@ fn connection_accept_loop(
 /// Handles a single vsock stream to
 /// exchange datagrams over UDP socket
 /// - Reads framed packet from vsock stream (header + payload)
-/// - Resolves hostname to IP and sends the paylaod to UDP endpoint
+/// - Resolves hostname to IP and sends the payload to UDP endpoint
 /// - Receives UDP response
 /// - Sends framed packet over vsock stream
 fn handle_vsock_datagrams_over_stream(
     mut stream: VsockStream,
     udp_socket: Arc<UdpSocket>,
     hostname_cache: Arc<HostnameCache>,
+    policy_manager: Option<Arc<PolicyManager>>,
 ) -> io::Result<()> {
     // Set timeouts on the stream
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
@@ -579,6 +604,17 @@ fn handle_vsock_datagrams_over_stream(
                     header.port,
                     payload.len()
                 );
+
+                // Check if connection is allowed by policy
+                if let Some(manager) = &policy_manager {
+                    if !manager.is_allowed(&header.hostname, header.port, Protocol::Udp) {
+                        error!(
+                            "UDP connection to {}:{} is not allowed by policy",
+                            header.hostname, header.port
+                        );
+                        continue; // Skip this packet, but keep connection open for other packets
+                    }
+                }
 
                 // Resolve hostname to IP
                 let dest_addr = if let Some(ip) = hostname_cache.get_ip(&header.hostname, header.port) {
@@ -609,6 +645,19 @@ fn handle_vsock_datagrams_over_stream(
                     resolved
                 };
 
+                // Check and add TX bytes if policy manager is present
+                if let Some(manager) = &policy_manager {
+                    if let Err(e) = manager.check_and_add_tx_bytes(
+                        &header.hostname,
+                        header.port,
+                        Protocol::Udp,
+                        payload.len() as u64,
+                    ) {
+                        error!("TX bytes limit exceeded for UDP {}:{}: {}", header.hostname, header.port, e);
+                        continue; // Skip this packet due to limit
+                    }
+                }
+
                 // Send to UDP destination
                 udp_socket.send_to(&payload, dest_addr)?;
                 debug!("Sent {} bytes to UDP {}", payload.len(), dest_addr);
@@ -621,13 +670,17 @@ fn handle_vsock_datagrams_over_stream(
                     Ok((response_len, src_udp_addr)) => {
                         debug!("Received {} bytes response from UDP {}", response_len, src_udp_addr);
 
+                        if src_udp_addr != dest_addr {
+                            warn!("Received UDP packet from {} which is not an expected responder {}", src_udp_addr, dest_addr);
+                            break;
+                        }
+
                         // Look up hostname for source IP
                         let (response_hostname, response_port) = if let Some((hostname, port)) = hostname_cache.get_hostname(&src_udp_addr.ip(), src_udp_addr.port()) {
                             debug!("Cache hit for {} -> {}:{}", src_udp_addr.ip(), hostname, port);
                             (hostname, port)
                         } else {
                             // If not in cache, just break the loop
-                            // a malicious UDP endpoint may try to sent a packet to us
                             warn!("Cache miss while receiving UDP response for {}", src_udp_addr.ip());
                             break;
                         };
@@ -665,6 +718,12 @@ fn handle_vsock_datagrams_over_stream(
             }
         }
     }
+
+    // Print diagnostic information after finishing
+    if let Some(manager) = &policy_manager {
+        manager.log_connection_complete("UDP", 0, Protocol::Udp);
+    }
+    info!("Vsock datagram handler finished");
 
     Ok(())
 }

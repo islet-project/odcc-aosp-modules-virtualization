@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use vsock::VsockStream;
 
-use crate::policy::PolicyManager;
+use crate::policy::{PolicyManager, Protocol};
 use crate::BUFFER_SIZE;
 
 const BUFFER_SIZE_VSOCK: usize = BUFFER_SIZE;
@@ -93,6 +93,7 @@ pub fn copy_bidirectional(
                             manager.check_and_add_tx_bytes(
                                 &server_addr_clone,
                                 server_port,
+                                Protocol::Tcp,
                                 n as u64,
                             )?;
                         } else {
@@ -160,7 +161,7 @@ pub fn copy_bidirectional(
     info!("Connection complete");
     // Log connection completion using PolicyManager's encapsulated method
     if let Some(manager) = &policy_manager {
-        manager.log_connection_complete(&server_addr, server_port);
+        manager.log_connection_complete(&server_addr, server_port, Protocol::Tcp);
     } else {
         info!("  TX: {} bytes", bytes_tx.load(Ordering::SeqCst));
     }

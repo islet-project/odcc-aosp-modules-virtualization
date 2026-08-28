@@ -97,6 +97,7 @@ android_system_image {
         "microdroid_property_contexts",
         "mke2fs.microdroid",
         "microdroid_fstab",
+        "nts_devel_cert",
 
         "libvm_payload", // used by payload to interact with microdroid manager
 
@@ -408,6 +409,14 @@ prebuilt_etc {
     name: "microdroid_event-log-tags",
     src: "microdroid_event-log-tags",
     filename: "event-log-tags",
+    no_full_install: true,
+}
+
+prebuilt_etc {
+    name: "nts_devel_cert",
+    src: "nts-devel.crt",
+    filename: "nts-devel.crt",
+    relative_install_path: "certs",
     no_full_install: true,
 }
 

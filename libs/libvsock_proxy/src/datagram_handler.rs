@@ -517,16 +517,14 @@ fn connection_accept_loop(
             break;
         }
 
-        // Poll with 100ms timeout - efficient waiting without busy-loop
+        // We're using poll here to prevent from busy-waiting in a loop
         {
             let listener_guard = vsock_listener.lock().unwrap();
-            // Use raw fd + BorrowedFd for AOSP nix crate compatibility
             let raw_fd = listener_guard.as_raw_fd();
             // Safety: BorrowedFd is only used within this scope while listener_guard is alive
             let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
             let poll_fd = PollFd::new(borrowed_fd, PollFlags::POLLIN);
 
-            // nix 0.28 uses PollTimeout type - u16 for milliseconds
             match poll(&mut [poll_fd], 100u16) {
                 Ok(0) => {
                     // Timeout - no connection ready, drop guard and continue
@@ -534,7 +532,7 @@ fn connection_accept_loop(
                     continue;
                 }
                 Ok(_) => {
-                    // Connection ready, accept it (still holding the lock)
+                    // Connection ready, accept it (still holding the guard lock)
                     match listener_guard.accept() {
                         Ok((stream, peer_addr)) => {
                             info!("Accepted vsock connection from CID:{} port:{}",
@@ -545,12 +543,11 @@ fn connection_accept_loop(
                                 continue;
                             }
 
-                            // Spawn a thread to handle this connection
                             let stream_hostname_cache = Arc::clone(&hostname_cache);
                             let stream_udp_socket = Arc::clone(&udp_socket);
                             let stream_policy_manager = policy_manager.clone();
 
-                            // This is intentional. We don't handle connection in a thread because
+                            // This is intentional. We don't handle a connection in a thread because
                             // we want handle them synchronously i.e. one connection at a time.
                             if let Err(e) = handle_vsock_datagrams_over_stream(
                                 stream,
@@ -558,21 +555,21 @@ fn connection_accept_loop(
                                 stream_hostname_cache,
                                 stream_policy_manager,
                             ) {
-                                warn!("Vsock stream handling error: {}", e);
+                                error!("Vsock stream handling error: {}", e);
                             }
                         }
                         Err(e) => {
-                            warn!("Failed to accept vsock connection: {}", e);
+                            error!("Failed to accept vsock connection: {}", e);
                             // Continue accepting other connections
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("Poll error: {}", e);
+                    error!("Poll error: {}", e);
                     // Continue accepting other connections
                 }
             }
-        } // listener_guard dropped here
+        } // listener_guard lock dropped here
     }
 
     Ok(())
@@ -670,6 +667,7 @@ fn handle_vsock_datagrams_over_stream(
                     Ok((response_len, src_udp_addr)) => {
                         debug!("Received {} bytes response from UDP {}", response_len, src_udp_addr);
 
+                        // Check if the reply comes from the destination UDP server
                         if src_udp_addr != dest_addr {
                             warn!("Received UDP packet from {} which is not an expected responder {}", src_udp_addr, dest_addr);
                             break;
@@ -719,7 +717,7 @@ fn handle_vsock_datagrams_over_stream(
         }
     }
 
-    // Print diagnostic information after finishing
+    // Print diagnostic information after finishing the handler
     if let Some(manager) = &policy_manager {
         manager.log_connection_complete("UDP", 0, Protocol::Udp);
     }

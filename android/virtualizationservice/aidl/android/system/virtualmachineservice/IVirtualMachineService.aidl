@@ -64,10 +64,4 @@ interface IVirtualMachineService {
      */
     ISecretkeeper getSecretkeeper();
 
-    /**
-     * Request the timestamp in milliseconds elapsed from the UNIX epoch from the Android host.
-     * Note, that this is a temporary solution. The Micrdroid should use Secure NTP protocol
-     * to fetch the time from trusted NTP servers.
-     */
-    long getTimeMillis();
 }

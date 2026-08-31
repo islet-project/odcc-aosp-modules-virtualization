@@ -45,7 +45,7 @@ use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use binder::Strong;
 use dice_driver::DiceDriver;
 use keystore2_crypto::ZVec;
-use libc::{clock_settime, timespec, CLOCK_REALTIME, VMADDR_CID_HOST};
+use libc::VMADDR_CID_HOST;
 use log::{error, info};
 use microdroid_metadata::{Metadata, PayloadMetadata};
 use microdroid_payload_config::{ApkConfig, OsConfig, Task, TaskType, VmPayloadConfig};
@@ -298,39 +298,6 @@ fn main() -> Result<()> {
         }
         e
     })
-}
-
-fn set_system_time_from_host(service: &Strong<dyn IVirtualMachineService>) -> Result<()> {
-    let time_millis = service.getTimeMillis()
-        .map_err(|e| {
-            MicrodroidError::FailedToConnectToVirtualizationService(format!(
-                "Failed to get time in milliseconds: {e:?}"
-            ))
-        })?;
-
-
-    let secs = time_millis / 1000;
-    let nsecs = (time_millis % 1000) * 1000000;
-    let ts = timespec {
-        tv_sec: secs as libc::time_t,
-        tv_nsec: nsecs as libc::c_long,
-    };
-
-    // SAFETY: The pointer `&ts` is valid for the duration of the call since it points to a
-    // stack-allocated local variable and the microdroid_manager runs with sufficient privileges
-    // to set the system time.
-    let res = unsafe {
-        clock_settime(CLOCK_REALTIME, &ts)
-    };
-
-    if res == 0 {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "Failed to set system time: {}",
-            std::io::Error::last_os_error()
-        ))
-    }
 }
 
 fn set_system_time_using_nts() -> Result<()> {
@@ -606,7 +573,7 @@ fn try_run_payload(
         .context("set microdroid_manager.init_done")?;
 
     // TODO Currently we're fetching the time from host. In the future we will nneed to implement Secure NTP client over vsock
-    set_system_time_from_host(service)?;
+    //set_system_time_from_host(service)?;
 
     // We're using a prebuilt NTS client that runs over vsock proxy
     set_system_time_using_nts()?;

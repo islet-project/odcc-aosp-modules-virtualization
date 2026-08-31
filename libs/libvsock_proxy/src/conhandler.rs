@@ -192,103 +192,15 @@ impl ConnectionHandler
         let vm_cid = self.config.vm_cid;
 
         let join_handle = std::thread::spawn(move || {
-            loop {
-                // Check stop flag before polling
-                if stop_flag_clone.load(Ordering::Relaxed) {
-                    info!("Stop flag set, exiting listener thread");
-                    break;
-                }
-
-                // Poll with 100ms timeout - efficient waiting without busy-loop
-                {
-                    let listener_guard = listener_clone.lock().unwrap();
-                    // Use raw fd + BorrowedFd for AOSP nix crate compatibility
-                    let raw_fd = listener_guard.as_raw_fd();
-                    // Safety: BorrowedFd is only used within this scope while listener_guard is alive
-                    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
-                    let poll_fd = PollFd::new(borrowed_fd, PollFlags::POLLIN);
-
-                    // nix 0.28 uses PollTimeout type - u16 for milliseconds
-                    match poll(&mut [poll_fd], 100u16) {
-                        Ok(0) => {
-                            // Timeout - no connection ready, drop guard and continue
-                            drop(listener_guard);
-                            continue;
-                        }
-                        Ok(_) => {
-                            // Connection ready, accept it (still holding the lock)
-                            match listener_guard.accept() {
-                                Ok((mut vsock, _addr)) => {
-                                    let peer_addr = match vsock.peer_addr()
-                                    {
-                                        Ok(addr) => addr,
-                                        Err(e) =>
-                                        {
-                                            error!("Failed to get peer address: {}", e);
-                                            continue;
-                                        }
-                                    };
-
-                                    info!(
-                                        "New vsock connection from CID:{} port:{}",
-                                        peer_addr.cid(),
-                                        peer_addr.port()
-                                    );
-
-                                    if peer_addr.cid() != vm_cid {
-                                        error!("Peer CID {} is not allowed to connect to the proxy", peer_addr.cid());
-                                        continue;
-                                    }
-
-                                    let server_addr = if conproto
-                                    {
-                                        match receive_connection_request(&mut vsock)
-                                        {
-                                            Ok(request) => request.server_addr,
-                                            Err(e) =>
-                                            {
-                                                error!("Failed to read connection request: {}", e);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        match server_addr {
-                                            Some(ref server_addr) => server_addr.clone(),
-                                            None => {
-                                                error!("Missing server address!");
-                                                break;
-                                            }
-                                        }
-                                    };
-
-                                    // This is intentional. We don't handle connection in a thread because
-                                    // we want handle them synchronously i.e. one connection at a time.
-                                    if let Err(e) = handle_vsock_connection(
-                                        vsock,
-                                        &server_addr,
-                                        timeout_secs,
-                                        conproto,
-                                        &policy_manager,
-                                    )
-                                    {
-                                        error!("Connection handler error: {}", e);
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Failed to accept vsock connection: {}", e);
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Poll error: {}", e);
-                            break;
-                        }
-                    }
-                } // listener_guard dropped here
-            }
+            connection_accept_loop(
+                stop_flag_clone,
+                listener_clone,
+                conproto,
+                server_addr,
+                timeout_secs,
+                policy_manager,
+                vm_cid,
+            );
         });
 
         self.connection_listener = Some(ConnectionListener { join_handle, stop_flag });
@@ -443,4 +355,111 @@ fn handle_vsock_connection(
     }
 
     Ok(())
+}
+
+/// Handles accepting vsock connections and proxying them to TCP servers
+fn connection_accept_loop(
+    stop_flag: Arc<AtomicBool>,
+    listener: Arc<Mutex<VsockListener>>,
+    conproto: bool,
+    server_addr: Option<String>,
+    timeout_secs: u64,
+    policy_manager: Option<Arc<PolicyManager>>,
+    vm_cid: u32,
+) {
+    loop {
+        // Check stop flag before polling
+        if stop_flag.load(Ordering::Relaxed) {
+            info!("Stop flag set, exiting listener thread");
+            break;
+        }
+
+        // We're using poll here to prevent from busy-waiting in a loop
+        {
+            let listener_guard = listener.lock().unwrap();
+            let raw_fd = listener_guard.as_raw_fd();
+            // Safety: BorrowedFd is only used within this scope while listener_guard is alive
+            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+            let poll_fd = PollFd::new(borrowed_fd, PollFlags::POLLIN);
+
+            match poll(&mut [poll_fd], 100u16) {
+                Ok(0) => {
+                    // Timeout - no connection ready, drop guard and continue
+                    drop(listener_guard);
+                    continue;
+                }
+                Ok(_) => {
+                    // Connection ready, accept it (still holding the lock)
+                    match listener_guard.accept() {
+                        Ok((mut vsock, _addr)) => {
+                            let peer_addr = match vsock.peer_addr()
+                            {
+                                Ok(addr) => addr,
+                                Err(e) =>
+                                {
+                                    error!("Failed to get peer address: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            info!(
+                                "New vsock connection from CID:{} port:{}",
+                                peer_addr.cid(),
+                                peer_addr.port()
+                            );
+
+                            if peer_addr.cid() != vm_cid {
+                                error!("Peer CID {} is not allowed to connect to the proxy", peer_addr.cid());
+                                continue;
+                            }
+
+                            let server_addr = if conproto
+                            {
+                                match receive_connection_request(&mut vsock)
+                                {
+                                    Ok(request) => request.server_addr,
+                                    Err(e) =>
+                                    {
+                                        error!("Failed to read connection request: {}", e);
+                                        continue;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                match server_addr {
+                                    Some(ref server_addr) => server_addr.clone(),
+                                    None => {
+                                        error!("Missing server address!");
+                                        break;
+                                    }
+                                }
+                            };
+
+                            // This is intentional. We don't handle a connection in a thread because
+                            // we want handle them synchronously i.e. one connection at a time.
+                            if let Err(e) = handle_vsock_connection(
+                                vsock,
+                                &server_addr,
+                                timeout_secs,
+                                conproto,
+                                &policy_manager,
+                            )
+                            {
+                                error!("Connection handler error: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to accept vsock connection: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Poll error: {}", e);
+                    break;
+                }
+            }
+        } // listener_guard dropped here
+    }
 }

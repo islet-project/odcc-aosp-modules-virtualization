@@ -92,7 +92,6 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::raw::pid_t;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak, LazyLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 use vbmeta::VbMetaImage;
 use vmconfig::{VmConfig, get_debug_level};
 use vsock::VsockStream;
@@ -148,6 +147,8 @@ const UNFORMATTED_STORAGE_MAGIC: &str = "UNFORMATTED-STORAGE";
 const PARTITION_GRANULARITY_BYTES: u64 = 4096;
 
 const VM_REFERENCE_DT_ON_HOST_PATH: &str = "/proc/device-tree/avf/reference";
+
+const REALM_METADATA_FILE_PATH: &str = "/apex/com.android.virt/etc/fs/microdroid_realm_metadata.bin";
 
 pub static GLOBAL_SERVICE: LazyLock<Strong<dyn IVirtualizationServiceInternal>> =
     LazyLock::new(|| {
@@ -702,7 +703,7 @@ impl VirtualizationService {
         let initrd = maybe_clone_file(&config.initrd)?;
 
         // Open the metadata file for Realm VMs
-        let metadata_path = Path::new("/apex/com.android.virt/etc/fs/microdroid_realm_metadata.bin");
+        let metadata_path = Path::new(REALM_METADATA_FILE_PATH);
         let metadata = if metadata_path.exists() {
             Some(File::open(metadata_path)
                 .with_context(|| format!("Failed to open metadata file {:?}", metadata_path))
@@ -2084,18 +2085,6 @@ impl IVirtualMachineService for VirtualMachineService {
 
     fn requestAttestation(&self, csr: &[u8], test_mode: bool) -> binder::Result<Vec<Certificate>> {
         GLOBAL_SERVICE.requestAttestation(csr, get_calling_uid() as i32, test_mode)
-    }
-
-    // This is temporary solution. Microdroid manager fetches the date/time from the Android
-    // host to set the system date/time inside the VM for the purposes of certificate
-    // validity period verification.
-    fn getTimeMillis(&self) -> binder::Result<i64> {
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("Failed to get current time")
-            .or_service_specific_exception(-1);
-        let duration = duration.unwrap();
-        Ok(duration.as_millis() as i64)
     }
 }
 

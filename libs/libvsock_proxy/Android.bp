@@ -29,7 +29,7 @@ rust_library {
     name: "libvsock_proxy",
     crate_name: "vsock_proxy",
     defaults: ["vsock_proxy_defaults"],
-    host_supported: true,
+    host_supported: false,
     srcs: [
         "src/lib.rs",
     ],

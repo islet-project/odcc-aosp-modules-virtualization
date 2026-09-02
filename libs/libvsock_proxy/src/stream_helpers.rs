@@ -114,8 +114,8 @@ pub fn copy_bidirectional(
         })();
         debug!("VSOCK -> TCP TX done");
         // If we detect an error (due to tx byte limit check) we use shutdown(Shutdown::Both) to force
-        // VSOCK <- TCP stream handling thread to close sockets. It shutdowns connections immediately
-        // preventing from keeping half-open connections.
+        // VSOCK <- TCP stream handling thread to close sockets. It shuts down connections immediately
+        // preventing half-open connections.
         let vsock_read_shutdown = if result.is_err() {
             Shutdown::Both
         } else {

@@ -322,7 +322,7 @@ pub struct DatagramHandlerConfig {
     pub cache_timeout_secs: u64,
     /// A policy manager instance controlling the white-list of UDP servers
     pub policy_manager: Option<Arc<PolicyManager>>,
-    /// The CID of VM. It is used to allow only one particular VM to connect to that proxy instance
+    /// The CID of VM. It is used to allow only one particular VM to connect to this proxy instance
     pub vm_cid: u32,
 }
 
@@ -366,7 +366,6 @@ pub struct DatagramHandler {
     udp_socket: Option<Arc<UdpSocket>>,
     vsock_listener: Option<Arc<Mutex<VsockListener>>>,
     datagram_listener: Option<DatagramListener>,
-    policy_manager: Option<Arc<PolicyManager>>,
 }
 
 impl fmt::Debug for DatagramHandler {
@@ -397,7 +396,6 @@ impl DatagramHandler {
             udp_socket: None,
             vsock_listener: None,
             datagram_listener: None,
-            policy_manager: None,
         }
     }
 
@@ -445,12 +443,13 @@ impl DatagramHandler {
         let stop_flag_clone = Arc::clone(&stop_flag);
         let vm_cid = self.config.vm_cid;
         let policy_manager = self.config.policy_manager.clone();
-        self.policy_manager = policy_manager.clone();
+        let timeout_secs = self.config.timeout_secs;
 
         let join_handle = std::thread::spawn(move || {
             if let Err(e) = connection_accept_loop(
                 vsock_listener,
                 udp_socket,
+                timeout_secs,
                 hostname_cache,
                 stop_flag_clone,
                 vm_cid,
@@ -505,6 +504,7 @@ impl DatagramHandler {
 fn connection_accept_loop(
     vsock_listener: Arc<Mutex<VsockListener>>,
     udp_socket: Arc<UdpSocket>,
+    timeout_secs: u64,
     hostname_cache: Arc<HostnameCache>,
     stop_flag: Arc<AtomicBool>,
     vm_cid: u32,
@@ -548,10 +548,11 @@ fn connection_accept_loop(
                             let stream_policy_manager = policy_manager.clone();
 
                             // This is intentional. We don't handle a connection in a thread because
-                            // we want handle them synchronously i.e. one connection at a time.
+                            // we want to handle them synchronously i.e. one connection at a time.
                             if let Err(e) = handle_vsock_datagrams_over_stream(
                                 stream,
                                 stream_udp_socket,
+                                timeout_secs,
                                 stream_hostname_cache,
                                 stream_policy_manager,
                             ) {
@@ -576,7 +577,7 @@ fn connection_accept_loop(
 }
 
 /// Handles a single vsock stream to
-/// exchange datagrams over UDP socket
+/// exchange datagrams over the UDP socket
 /// - Reads framed packet from vsock stream (header + payload)
 /// - Resolves hostname to IP and sends the payload to UDP endpoint
 /// - Receives UDP response
@@ -584,12 +585,13 @@ fn connection_accept_loop(
 fn handle_vsock_datagrams_over_stream(
     mut stream: VsockStream,
     udp_socket: Arc<UdpSocket>,
+    timeout_secs: u64,
     hostname_cache: Arc<HostnameCache>,
     policy_manager: Option<Arc<PolicyManager>>,
 ) -> io::Result<()> {
     // Set timeouts on the stream
-    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
 
     loop {
         // Try to read a complete frame from the stream

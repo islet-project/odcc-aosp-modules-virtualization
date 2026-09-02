@@ -47,7 +47,7 @@ struct Args
     #[arg(long, default_value_t = 1337)]
     vsock_port: u32,
 
-    /// The IP address and port of remote server (addr:port) - used only in stream mode
+    /// The IP address and port of remote server (address:port) - used only in stream mode
     #[arg(long, default_value = "127.0.0.1:1337")]
     server_addr: String,
 

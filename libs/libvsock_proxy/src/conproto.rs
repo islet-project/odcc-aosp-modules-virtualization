@@ -91,7 +91,7 @@ pub fn send_connection_response<W: Write>(
         )
     })?;
 
-    // ratls-get expects JSON followed by newline
+    // ratls-get expects JSON followed by a newline
     json.push('\n');
     writer.write_all(json.as_bytes())?;
     writer.flush()?;

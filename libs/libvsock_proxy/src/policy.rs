@@ -2,9 +2,7 @@
 
 use log::{info};
 use serde::Deserialize;
-//use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
-//use std::io::Read;
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,7 +101,7 @@ impl Default for ServerStatsHashMap
     }
 }
 
-/// A policy manager maintaining the whitelist of servers and TCP/IP connections statistics
+/// A policy manager maintaining the whitelist of servers and TCP/IP connection statistics
 pub struct PolicyManager
 {
     whitelist: RwLock<ServerWhitelist>,
@@ -291,7 +289,7 @@ impl PolicyManager
         false
     }
 
-    /// Displays the log policy (for debug purposes)
+    /// Displays the policy log (for debug purposes)
     pub fn log_policy(&self)
     {
         let whitelist_guard = self.whitelist.read().expect("Failed to acquire read lock");

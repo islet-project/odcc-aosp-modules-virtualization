@@ -578,7 +578,10 @@ impl VirtualizationService {
 
                         Some(policy_manager)
                     },
-                    Err(_) => None,
+                    Err(e) => {
+                        warn!("Cannot initialize PolicyManager from file {}", e);
+                        None
+                    }
                 }
             },
             VirtualMachineConfig::RawConfig(_) => None,
@@ -624,7 +627,7 @@ impl VirtualizationService {
                 .context("Failed to create datagram vsock proxy connection handler")
                 .or_binder_exception(ExceptionCode::ILLEGAL_ARGUMENT)?;
 
-            info!("Datagram vsock proxy is listening at {} port", stream_vsock_proxy_port);
+            info!("Datagram vsock proxy is listening at {} port", datagram_vsock_proxy_port);
             Some(datagram_vsock_proxy_connection_handler)
         } else {
             error!("Datagram vsock proxy is not active");

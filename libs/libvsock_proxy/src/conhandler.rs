@@ -75,7 +75,7 @@ pub const BUFFER_SIZE: usize = 65536;
 /// Default TCP connection timeout in seconds
 pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
-/// The timeout for read/write operations on TCP socket
+/// The timeout for read/write operations on TCP sockets
 pub const TCP_READ_WRITE_TIMEOUT: u64 = 60;
 
 /// Configuration for the connection handler
@@ -93,7 +93,7 @@ pub struct ConnectionHandlerConfig
     pub timeout_secs: u64,
     /// A policy manager instance controlling the white-list of TCP/IP servers
     pub policy_manager: Option<Arc<PolicyManager>>,
-    /// The CID of VM. It is used to allow only one particular VM to connect to that proxy instance
+    /// The CID of VM. It is used to allow only one particular VM to connect to this proxy instance
     pub vm_cid: u32,
 }
 
@@ -129,7 +129,7 @@ impl Default for ConnectionHandlerConfig
     }
 }
 
-/// Connection listener responsible for handling vsock connections comming from a VM
+/// Connection listener responsible for handling vsock connections coming from a VM
 pub struct ConnectionListener
 {
     join_handle: JoinHandle<()>,
@@ -173,6 +173,9 @@ impl ConnectionHandler
 
         if self.config.conproto {
             info!("Connection protocol is enabled.");
+        } else if self.config.server_addr.is_none() {
+            error!("Connection protocol is disabled and the server address is not specified!");
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Connection protocol is disabled and the server address is not specified!"));
         }
 
         let listener = VsockListener::bind_with_cid_port(self.config.vsock_cid.into(), self.config.vsock_port)
@@ -437,7 +440,7 @@ fn connection_accept_loop(
                             };
 
                             // This is intentional. We don't handle a connection in a thread because
-                            // we want handle them synchronously i.e. one connection at a time.
+                            // we want to handle them synchronously i.e. one connection at a time.
                             if let Err(e) = handle_vsock_connection(
                                 vsock,
                                 &server_addr,

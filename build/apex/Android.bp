@@ -405,6 +405,7 @@ genrule {
         "--disk $(genDir)/disks/disk4.img " +
         "--kernel $(location :microdroid_kernel) " +
         "--ipc-dir $(genDir)/ipc-dir " +
+        "--network mode=none " +
         "--debug " +
         "--realm " +
         "--realm-pv-hex c85f3e4db5ebb451a6e384c77da00a4eff1dfc849bafb551ce40a4c548f4807ced8e7312e5129c143a731c2cb6ef2c57db9e5c98407bc061693c40ecd44f038b " +
